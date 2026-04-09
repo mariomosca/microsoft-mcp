@@ -573,6 +573,14 @@ def update_event(
         formatted_updates["location"] = {"displayName": updates["location"]}
     if "body" in updates:
         formatted_updates["body"] = {"contentType": "Text", "content": updates["body"]}
+    if "categories" in updates:
+        formatted_updates["categories"] = updates["categories"]
+
+    # Pass through any other Graph API properties not explicitly handled
+    known_keys = {"subject", "start", "end", "location", "body", "categories", "timezone"}
+    for key in updates:
+        if key not in known_keys and key not in formatted_updates:
+            formatted_updates[key] = updates[key]
 
     result = graph.request(
         "PATCH", f"/me/events/{event_id}", account_id, json=formatted_updates
