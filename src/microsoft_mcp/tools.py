@@ -524,13 +524,50 @@ def create_event(
     body: str | None = None,
     attendees: str | list[str] | None = None,
     timezone: str = "UTC",
+    is_online_meeting: bool = False,
+    online_meeting_provider: str = "teamsForBusiness",
+    importance: str = "normal",
+    is_all_day: bool = False,
+    categories: list[str] | None = None,
+    sensitivity: str = "normal",
+    show_as: str = "busy",
+    reminder_minutes: int = 15,
 ) -> dict[str, Any]:
-    """Create a calendar event"""
+    """Create a calendar event.
+
+    Args:
+        account_id: Microsoft account ID
+        subject: Event title
+        start: Start datetime (ISO format, e.g. 2026-04-10T14:30:00)
+        end: End datetime (ISO format)
+        location: Location display name
+        body: Event body/description text
+        attendees: Email address(es) of attendees
+        timezone: Timezone (default UTC, e.g. Europe/Rome)
+        is_online_meeting: If true, creates a Teams meeting link
+        online_meeting_provider: Provider for online meeting (default teamsForBusiness)
+        importance: Event importance (low, normal, high)
+        is_all_day: If true, creates an all-day event
+        categories: List of category names
+        sensitivity: Event sensitivity (normal, personal, private, confidential)
+        show_as: Free/busy status (free, tentative, busy, oof, workingElsewhere, unknown)
+        reminder_minutes: Minutes before event to show reminder (default 15)
+    """
     event = {
         "subject": subject,
         "start": {"dateTime": start, "timeZone": timezone},
         "end": {"dateTime": end, "timeZone": timezone},
+        "importance": importance,
+        "isAllDay": is_all_day,
+        "sensitivity": sensitivity,
+        "showAs": show_as,
+        "isReminderOn": reminder_minutes > 0,
+        "reminderMinutesBeforeStart": reminder_minutes,
     }
+
+    if is_online_meeting:
+        event["isOnlineMeeting"] = True
+        event["onlineMeetingProvider"] = online_meeting_provider
 
     if location:
         event["location"] = {"displayName": location}
@@ -543,6 +580,9 @@ def create_event(
         event["attendees"] = [
             {"emailAddress": {"address": a}, "type": "required"} for a in attendees_list
         ]
+
+    if categories:
+        event["categories"] = categories
 
     result = graph.request("POST", "/me/events", account_id, json=event)
     if not result:
