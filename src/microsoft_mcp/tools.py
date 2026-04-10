@@ -1017,6 +1017,52 @@ def search_contacts(
 
 
 @mcp.tool
+def search_people(
+    query: str,
+    account_id: str,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    """Search people in the organization directory (Global Address List) and frequent contacts.
+
+    Uses the /me/people endpoint which searches across:
+    - Azure AD / Entra directory (all company users)
+    - Frequent contacts and communication patterns
+    - Personal contacts
+
+    Returns name, email, job title, department, and office location.
+    """
+    params = {
+        "$search": f'"{query}"',
+        "$top": min(limit, 100),
+        "$select": "displayName,emailAddresses,jobTitle,department,officeLocation,companyName,userPrincipalName",
+    }
+
+    result = graph.request("GET", "/me/people", account_id, params=params)
+    if not result or "value" not in result:
+        return []
+
+    people = []
+    for person in result["value"]:
+        emails = [
+            e.get("address")
+            for e in person.get("emailAddresses", [])
+            if e.get("address")
+        ]
+        people.append(
+            {
+                "displayName": person.get("displayName"),
+                "emails": emails,
+                "jobTitle": person.get("jobTitle"),
+                "department": person.get("department"),
+                "officeLocation": person.get("officeLocation"),
+                "companyName": person.get("companyName"),
+            }
+        )
+
+    return people
+
+
+@mcp.tool
 def unified_search(
     query: str,
     account_id: str,
