@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 microsoft-mcp = "microsoft_mcp.server:main"
+microsoft-mcp-auth = "microsoft_mcp.cli_auth:main"
 
 [build-system]
 requires = ["hatchling"]
