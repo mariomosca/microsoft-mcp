@@ -23,6 +23,26 @@ FOLDERS = {
 @mcp.tool
 def list_accounts() -> list[dict[str, str]]:
     """List all signed-in Microsoft accounts"""
+    from .auth_context import current_graph_token
+
+    # HTTP mode: user is already authenticated via OAuth/OBO
+    if current_graph_token.get() is not None:
+        try:
+            from fastmcp.server.dependencies import get_access_token
+
+            token = get_access_token()
+            if token and hasattr(token, "claims"):
+                upstream = (token.claims or {}).get("upstream_claims", {})
+                return [
+                    {
+                        "username": upstream.get("upn", upstream.get("name", "authenticated-user")),
+                        "account_id": upstream.get("oid", "http-user"),
+                    }
+                ]
+        except Exception:
+            pass
+
+    # Stdio mode: return from MSAL cache
     return [
         {"username": acc.username, "account_id": acc.account_id}
         for acc in auth.list_accounts()
