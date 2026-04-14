@@ -8,15 +8,17 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "fastmcp>=2.8.0",
+    "fastmcp[azure]>=3.2.0",
     "httpx>=0.28.1",
     "msal>=1.32.3",
     "python-dotenv>=1.1.0",
+    "uvicorn[standard]>=0.30.0",
 ]
 
 [project.scripts]
 microsoft-mcp = "microsoft_mcp.server:main"
 microsoft-mcp-auth = "microsoft_mcp.cli_auth:main"
+microsoft-mcp-http = "microsoft_mcp.server:main_http"
 
 [build-system]
 requires = ["hatchling"]

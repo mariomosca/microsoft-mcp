@@ -2,8 +2,15 @@ import httpx
 import time
 from typing import Any, Iterator
 from .auth import get_token
+from .auth_context import current_graph_token
 
 BASE_URL = "https://graph.microsoft.com/v1.0"
+
+
+def _resolve_token(account_id: str | None = None) -> str:
+    """Get Graph token from HTTP context (ContextVar) or fall back to MSAL."""
+    ctx_token = current_graph_token.get()
+    return ctx_token if ctx_token else get_token(account_id)
 # 15 x 320 KiB = 4,915,200 bytes
 UPLOAD_CHUNK_SIZE = 15 * 320 * 1024
 
@@ -19,8 +26,9 @@ def request(
     data: bytes | None = None,
     max_retries: int = 3,
 ) -> dict[str, Any] | None:
+    token = _resolve_token(account_id)
     headers = {
-        "Authorization": f"Bearer {get_token(account_id)}",
+        "Authorization": f"Bearer {token}",
     }
 
     if method == "GET":
@@ -117,7 +125,8 @@ def request_paginated(
 def download_raw(
     path: str, account_id: str | None = None, max_retries: int = 3
 ) -> bytes:
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+    token = _resolve_token(account_id)
+    headers = {"Authorization": f"Bearer {token}"}
 
     retry_count = 0
     while retry_count <= max_retries:
@@ -229,7 +238,8 @@ def upload_large_file(
     session = create_upload_session(path, account_id, item_properties)
     upload_url = session["uploadUrl"]
 
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+    token = _resolve_token(account_id)
+    headers = {"Authorization": f"Bearer {token}"}
     return _do_chunked_upload(upload_url, data, headers)
 
 
@@ -270,7 +280,8 @@ def upload_large_mail_attachment(
     session = create_mail_upload_session(message_id, attachment_item, account_id)
     upload_url = session["uploadUrl"]
 
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+    token = _resolve_token(account_id)
+    headers = {"Authorization": f"Bearer {token}"}
     return _do_chunked_upload(upload_url, data, headers)
 
 
