@@ -530,8 +530,9 @@ def list_events(
 ) -> list[dict[str, Any]]:
     """List calendar events within specified date range, including recurring event instances"""
     now = dt.datetime.now(dt.timezone.utc)
-    start = (now - dt.timedelta(days=days_back)).isoformat()
-    end = (now + dt.timedelta(days=days_ahead)).isoformat()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = (today_start - dt.timedelta(days=days_back)).isoformat()
+    end = (today_start + dt.timedelta(days=days_ahead + 1)).isoformat()
 
     params = {
         "startDateTime": start,
