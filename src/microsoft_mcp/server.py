@@ -23,6 +23,15 @@ def _configure_auth() -> None:
     entra_tenant_id = os.environ["ENTRA_TENANT_ID"]
     public_base_url = os.environ["PUBLIC_BASE_URL"]
 
+    # Persist OAuth client registrations and encrypted token state in Redis when
+    # REDIS_URL is set; otherwise FastMCP falls back to its ephemeral file store
+    # (lost on container restart, causing invalid_token loops).
+    client_storage = None
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        from key_value.aio.stores.redis import RedisStore
+        client_storage = RedisStore(url=redis_url, default_collection="mcp-oauth")
+
     auth = AzureProvider(
         client_id=entra_client_id,
         client_secret=entra_client_secret,
@@ -40,6 +49,7 @@ def _configure_auth() -> None:
             "https://graph.microsoft.com/People.Read",
         ],
         jwt_signing_key=os.getenv("JWT_SIGNING_KEY"),
+        client_storage=client_storage,
     )
 
     mcp.auth = auth

@@ -12,6 +12,7 @@ dependencies = [
     "fastmcp[azure]>=3.2.0",
     "httpx>=0.28.1",
     "msal>=1.32.3",
+    "py-key-value-aio[redis]>=0.4.4",
     "python-dotenv>=1.1.0",
     "uvicorn[standard]>=0.30.0",
 ]
