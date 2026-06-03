@@ -776,20 +776,54 @@ async def test_get_file():
 
 @pytest.mark.asyncio
 async def test_create_file():
-    """Test create_file tool"""
+    """Test create_file tool via inline base64 content (HTTP-remote path)"""
+    import base64
+
     async for session in get_session():
         account_info = await get_account_info(session)
         test_content = f"MCP Integration Test\nTimestamp: {datetime.now().isoformat()}"
         test_filename = (
             f"mcp-test-create-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
         )
-        
+        content_base64 = base64.b64encode(test_content.encode()).decode()
+
+        result = await session.call_tool(
+            "create_file",
+            {
+                "account_id": account_info["account_id"],
+                "onedrive_path": test_filename,
+                "content_base64": content_base64,
+            },
+        )
+        assert not result.isError
+        upload_result = parse_result(result)
+        assert upload_result is not None
+        assert "id" in upload_result
+
+        file_id = upload_result.get("id")
+        delete_result = await session.call_tool(
+            "delete_file",
+            {"file_id": file_id, "account_id": account_info["account_id"]},
+        )
+        assert not delete_result.isError
+
+
+@pytest.mark.asyncio
+async def test_create_file_local_path():
+    """Test create_file tool via local_file_path (backward-compat / stdio)"""
+    async for session in get_session():
+        account_info = await get_account_info(session)
+        test_content = f"MCP Integration Test\nTimestamp: {datetime.now().isoformat()}"
+        test_filename = (
+            f"mcp-test-create-lp-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        )
+
         # Create a temporary local file
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', delete=False) as local_file:
             local_file.write(test_content)
             local_file_path = local_file.name
-        
+
         try:
             result = await session.call_tool(
                 "create_file",
@@ -818,56 +852,36 @@ async def test_create_file():
 
 @pytest.mark.asyncio
 async def test_update_file():
-    """Test update_file tool"""
+    """Test update_file tool via inline base64 content (HTTP-remote path)"""
+    import base64
+
     async for session in get_session():
         account_info = await get_account_info(session)
         test_content = "Original content"
         test_filename = (
             f"mcp-test-update-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
         )
-        
-        # Create a temporary local file
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as local_file:
-            local_file.write(test_content)
-            local_file_path = local_file.name
-        
-        try:
-            create_result = await session.call_tool(
-                "create_file",
-                {
-                    "account_id": account_info["account_id"],
-                    "onedrive_path": test_filename,
-                    "local_file_path": local_file_path,
-                },
-            )
-        finally:
-            # Clean up local file
-            if os.path.exists(local_file_path):
-                os.unlink(local_file_path)
+
+        create_result = await session.call_tool(
+            "create_file",
+            {
+                "account_id": account_info["account_id"],
+                "onedrive_path": test_filename,
+                "content_base64": base64.b64encode(test_content.encode()).decode(),
+            },
+        )
         file_data = parse_result(create_result)
         file_id = file_data.get("id")
 
         updated_content = f"Updated content at {datetime.now().isoformat()}"
-        
-        # Create a temporary local file with updated content
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as updated_file:
-            updated_file.write(updated_content)
-            updated_file_path = updated_file.name
-        
-        try:
-            result = await session.call_tool(
-                "update_file",
-                {
-                    "account_id": account_info["account_id"],
-                    "file_id": file_id,
-                    "local_file_path": updated_file_path,
-                },
-            )
-        finally:
-            # Clean up local file
-            if os.path.exists(updated_file_path):
-                os.unlink(updated_file_path)
+        result = await session.call_tool(
+            "update_file",
+            {
+                "account_id": account_info["account_id"],
+                "file_id": file_id,
+                "content_base64": base64.b64encode(updated_content.encode()).decode(),
+            },
+        )
         assert not result.isError
 
         delete_result = await session.call_tool(
@@ -970,10 +984,31 @@ async def test_get_attachment():
         assert email_detail.get("attachments"), "Email should have attachments"
         attachment = email_detail["attachments"][0]
 
-        # Test getting the attachment
+        # Gap #2: inline mode (no save_path) - returns content_base64 so an
+        # HTTP-remote client can recover the bytes without a shared filesystem.
+        import base64
+
+        inline_result = await session.call_tool(
+            "get_attachment",
+            {
+                "email_id": email_id,
+                "account_id": account_info["account_id"],
+                "attachment_id": attachment["id"],
+            },
+        )
+        assert not inline_result.isError
+        inline_data = parse_result(inline_result)
+        assert inline_data is not None
+        assert inline_data["name"] == "test_file.txt"
+        assert "saved_to" not in inline_data
+        assert "content_base64" in inline_data
+        decoded = base64.b64decode(inline_data["content_base64"]).decode()
+        assert decoded == "This is a test attachment content"
+
+        # Backward-compat: save_path mode still writes to the server filesystem.
         with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as save_file:
             save_path = save_file.name
-        
+
         try:
             result = await session.call_tool(
                 "get_attachment",
@@ -990,7 +1025,7 @@ async def test_get_attachment():
             assert attachment_data["name"] == "test_file.txt"
             assert "saved_to" in attachment_data
             assert attachment_data["saved_to"] == save_path
-            
+
             # Verify file was saved
             assert os.path.exists(save_path)
             with open(save_path, 'r') as f:
@@ -1037,6 +1072,11 @@ async def test_search_emails():
         assert not result.isError
         search_results = parse_result(result)
         assert search_results is not None
+        # Gap #1 regression: the folder-less branch must return the REST id so
+        # downstream tools (get_email / get_attachment) can use it.
+        if isinstance(search_results, list) and search_results:
+            for msg in search_results:
+                assert msg.get("id"), f"search_emails result missing REST id: {msg}"
 
 
 @pytest.mark.asyncio

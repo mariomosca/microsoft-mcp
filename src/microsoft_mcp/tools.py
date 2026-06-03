@@ -874,13 +874,38 @@ def get_file(file_id: str, account_id: str, download_path: str) -> dict[str, Any
         raise RuntimeError(f"Failed to download file: {e.stderr.decode()}")
 
 
+def _resolve_file_bytes(
+    content_base64: str | None, local_file_path: str | None
+) -> bytes:
+    """Resolve file content from inline base64 or a local path.
+
+    ``content_base64`` takes precedence. Raises if neither is provided.
+    """
+    if content_base64 is not None:
+        try:
+            return base64.b64decode(content_base64, validate=True)
+        except (ValueError, base64.binascii.Error) as e:
+            raise ValueError(f"Invalid base64 content: {e}")
+    if local_file_path is not None:
+        return pl.Path(local_file_path).expanduser().resolve().read_bytes()
+    raise ValueError("Provide either content_base64 or local_file_path")
+
+
 @mcp.tool
 def create_file(
-    onedrive_path: str, local_file_path: str, account_id: str
+    onedrive_path: str,
+    account_id: str,
+    content_base64: str | None = None,
+    local_file_path: str | None = None,
 ) -> dict[str, Any]:
-    """Upload a local file to OneDrive"""
-    path = pl.Path(local_file_path).expanduser().resolve()
-    data = path.read_bytes()
+    """Upload a file to OneDrive.
+
+    Provide the content either inline as base64 (``content_base64``, required
+    for remote/HTTP deployments where the server cannot read the client's
+    filesystem) or as a path to a local file (``local_file_path``, only works
+    when the server shares a filesystem with the caller, e.g. local stdio).
+    """
+    data = _resolve_file_bytes(content_base64, local_file_path)
     result = graph.upload_large_file(
         f"/me/drive/root:/{onedrive_path}:", data, account_id
     )
@@ -890,10 +915,19 @@ def create_file(
 
 
 @mcp.tool
-def update_file(file_id: str, local_file_path: str, account_id: str) -> dict[str, Any]:
-    """Update OneDrive file content from a local file"""
-    path = pl.Path(local_file_path).expanduser().resolve()
-    data = path.read_bytes()
+def update_file(
+    file_id: str,
+    account_id: str,
+    content_base64: str | None = None,
+    local_file_path: str | None = None,
+) -> dict[str, Any]:
+    """Update OneDrive file content.
+
+    Provide the new content either inline as base64 (``content_base64``,
+    required for remote/HTTP deployments) or as a path to a local file
+    (``local_file_path``, local stdio only).
+    """
+    data = _resolve_file_bytes(content_base64, local_file_path)
     result = graph.upload_large_file(f"/me/drive/items/{file_id}", data, account_id)
     if not result:
         raise ValueError(f"Failed to update file with ID: {file_id}")
@@ -909,9 +943,18 @@ def delete_file(file_id: str, account_id: str) -> dict[str, str]:
 
 @mcp.tool
 def get_attachment(
-    email_id: str, attachment_id: str, save_path: str, account_id: str
+    email_id: str,
+    attachment_id: str,
+    account_id: str,
+    save_path: str | None = None,
 ) -> dict[str, Any]:
-    """Download email attachment to a specified file path"""
+    """Download an email attachment.
+
+    If ``save_path`` is provided, the attachment is written to that path on the
+    server's filesystem (only useful for local stdio). Otherwise the content is
+    returned inline as base64 in ``content_base64`` - required for remote/HTTP
+    deployments and ready to be passed back to ``create_file(content_base64=...)``.
+    """
     result = graph.request(
         "GET", f"/me/messages/{email_id}/attachments/{attachment_id}", account_id
     )
@@ -922,18 +965,23 @@ def get_attachment(
     if "contentBytes" not in result:
         raise ValueError("Attachment content not available")
 
-    # Save attachment to file
-    path = pl.Path(save_path).expanduser().resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content_bytes = base64.b64decode(result["contentBytes"])
-    path.write_bytes(content_bytes)
-
-    return {
+    response: dict[str, Any] = {
         "name": result.get("name", "unknown"),
         "content_type": result.get("contentType", "application/octet-stream"),
         "size": result.get("size", 0),
-        "saved_to": str(path),
     }
+
+    if save_path is not None:
+        # Local stdio: persist to the server filesystem.
+        path = pl.Path(save_path).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(base64.b64decode(result["contentBytes"]))
+        response["saved_to"] = str(path)
+    else:
+        # Remote/HTTP: return the bytes inline (already base64 from Graph).
+        response["content_base64"] = result["contentBytes"]
+
+    return response
 
 
 @mcp.tool
@@ -981,7 +1029,28 @@ def search_emails(
             graph.request_paginated(endpoint, account_id, params=params, limit=limit)
         )
 
-    return list(graph.search_query(query, ["message"], account_id, limit))
+    # Without a folder we use /search/query. It returns a reduced property set
+    # unless explicit fields are requested - notably the REST id is missing,
+    # which breaks downstream tools (get_email, get_attachment). Request it.
+    return list(
+        graph.search_query(
+            query,
+            ["message"],
+            account_id,
+            limit,
+            fields=[
+                "id",
+                "subject",
+                "from",
+                "toRecipients",
+                "receivedDateTime",
+                "hasAttachments",
+                "webLink",
+                "conversationId",
+                "isRead",
+            ],
+        )
+    )
 
 
 @mcp.tool
