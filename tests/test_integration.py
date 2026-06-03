@@ -1072,8 +1072,9 @@ async def test_search_emails():
         assert not result.isError
         search_results = parse_result(result)
         assert search_results is not None
-        # Gap #1 regression: the folder-less branch must return the REST id so
-        # downstream tools (get_email / get_attachment) can use it.
+        # Gap #1 regression: the folder-less branch uses the $search endpoint on
+        # /me/messages (not /search/query, whose id is OWA-format and unusable)
+        # so it must return the REST id for downstream get_email / get_attachment.
         if isinstance(search_results, list) and search_results:
             for msg in search_results:
                 assert msg.get("id"), f"search_emails result missing REST id: {msg}"

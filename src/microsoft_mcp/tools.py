@@ -1013,43 +1013,30 @@ def search_emails(
     limit: int = 50,
     folder: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search emails using the modern search API."""
+    """Search emails by keyword.
+
+    Uses the traditional ``$search`` endpoint on ``/me/messages`` (or a specific
+    folder) rather than the modern ``/search/query`` API. The latter returns
+    each hit's ``id`` in an OWA/EWS-style format that is NOT usable as a REST id
+    by ``get_email`` / ``get_attachment`` (confirmed on the Brandart tenant),
+    which breaks the search -> open -> download-attachment workflow. The
+    ``$search`` endpoint returns the proper REST id via ``$select``.
+    """
     if folder:
-        # For folder-specific search, use the traditional endpoint
         folder_path = FOLDERS.get(folder.casefold(), folder)
         endpoint = f"/me/mailFolders/{folder_path}/messages"
+    else:
+        # Search the whole mailbox - same endpoint, no folder scope.
+        endpoint = "/me/messages"
 
-        params = {
-            "$search": f'"{query}"',
-            "$top": min(limit, 100),
-            "$select": "id,subject,from,toRecipients,receivedDateTime,hasAttachments,body,conversationId,isRead",
-        }
+    params = {
+        "$search": f'"{query}"',
+        "$top": min(limit, 100),
+        "$select": "id,subject,from,toRecipients,receivedDateTime,hasAttachments,body,conversationId,isRead",
+    }
 
-        return list(
-            graph.request_paginated(endpoint, account_id, params=params, limit=limit)
-        )
-
-    # Without a folder we use /search/query. It returns a reduced property set
-    # unless explicit fields are requested - notably the REST id is missing,
-    # which breaks downstream tools (get_email, get_attachment). Request it.
     return list(
-        graph.search_query(
-            query,
-            ["message"],
-            account_id,
-            limit,
-            fields=[
-                "id",
-                "subject",
-                "from",
-                "toRecipients",
-                "receivedDateTime",
-                "hasAttachments",
-                "webLink",
-                "conversationId",
-                "isRead",
-            ],
-        )
+        graph.request_paginated(endpoint, account_id, params=params, limit=limit)
     )
 
 
