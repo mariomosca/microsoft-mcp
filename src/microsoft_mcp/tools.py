@@ -237,8 +237,16 @@ def create_email_draft(
     body: str,
     cc: str | list[str] | None = None,
     attachments: str | list[str] | None = None,
+    attachments_inline: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Create an email draft with file path(s) as attachments"""
+    """Create an email draft, optionally with attachments.
+
+    Attachments may be provided as local file path(s) (``attachments``, server
+    filesystem only — works for local stdio) and/or inline as base64
+    (``attachments_inline``, a list of ``{"name": str, "content_base64": str}``,
+    required for remote/HTTP deployments where the server cannot read the
+    client's filesystem). Both may be combined.
+    """
     to_list = [to] if isinstance(to, str) else to
 
     message = {
@@ -256,33 +264,26 @@ def create_email_draft(
     small_attachments = []
     large_attachments = []
 
-    if attachments:
-        # Convert single path to list
-        attachment_paths = (
-            [attachments] if isinstance(attachments, str) else attachments
-        )
-        for file_path in attachment_paths:
-            path = pl.Path(file_path).expanduser().resolve()
-            content_bytes = path.read_bytes()
-            att_size = len(content_bytes)
-            att_name = path.name
-
-            if att_size < 3 * 1024 * 1024:
-                small_attachments.append(
-                    {
-                        "@odata.type": "#microsoft.graph.fileAttachment",
-                        "name": att_name,
-                        "contentBytes": base64.b64encode(content_bytes).decode("utf-8"),
-                    }
-                )
-            else:
-                large_attachments.append(
-                    {
-                        "name": att_name,
-                        "content_bytes": content_bytes,
-                        "content_type": "application/octet-stream",
-                    }
-                )
+    for att_name, content_bytes in _resolve_email_attachments(
+        attachments, attachments_inline
+    ):
+        att_size = len(content_bytes)
+        if att_size < 3 * 1024 * 1024:
+            small_attachments.append(
+                {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": att_name,
+                    "contentBytes": base64.b64encode(content_bytes).decode("utf-8"),
+                }
+            )
+        else:
+            large_attachments.append(
+                {
+                    "name": att_name,
+                    "content_bytes": content_bytes,
+                    "content_type": "application/octet-stream",
+                }
+            )
 
     if small_attachments:
         message["attachments"] = small_attachments
@@ -313,8 +314,16 @@ def send_email(
     body: str,
     cc: str | list[str] | None = None,
     attachments: str | list[str] | None = None,
+    attachments_inline: list[dict[str, str]] | None = None,
 ) -> dict[str, str]:
-    """Send an email immediately with file path(s) as attachments"""
+    """Send an email immediately, optionally with attachments.
+
+    Attachments may be provided as local file path(s) (``attachments``, server
+    filesystem only — works for local stdio) and/or inline as base64
+    (``attachments_inline``, a list of ``{"name": str, "content_base64": str}``,
+    required for remote/HTTP deployments where the server cannot read the
+    client's filesystem). Both may be combined.
+    """
     to_list = [to] if isinstance(to, str) else to
 
     message = {
@@ -333,28 +342,20 @@ def send_email(
     has_large_attachments = False
     processed_attachments = []
 
-    if attachments:
-        # Convert single path to list
-        attachment_paths = (
-            [attachments] if isinstance(attachments, str) else attachments
+    for att_name, content_bytes in _resolve_email_attachments(
+        attachments, attachments_inline
+    ):
+        att_size = len(content_bytes)
+        processed_attachments.append(
+            {
+                "name": att_name,
+                "content_bytes": content_bytes,
+                "content_type": "application/octet-stream",
+                "size": att_size,
+            }
         )
-        for file_path in attachment_paths:
-            path = pl.Path(file_path).expanduser().resolve()
-            content_bytes = path.read_bytes()
-            att_size = len(content_bytes)
-            att_name = path.name
-
-            processed_attachments.append(
-                {
-                    "name": att_name,
-                    "content_bytes": content_bytes,
-                    "content_type": "application/octet-stream",
-                    "size": att_size,
-                }
-            )
-
-            if att_size >= 3 * 1024 * 1024:
-                has_large_attachments = True
+        if att_size >= 3 * 1024 * 1024:
+            has_large_attachments = True
 
     if not has_large_attachments and processed_attachments:
         message["attachments"] = [
@@ -889,6 +890,38 @@ def _resolve_file_bytes(
     if local_file_path is not None:
         return pl.Path(local_file_path).expanduser().resolve().read_bytes()
     raise ValueError("Provide either content_base64 or local_file_path")
+
+
+def _resolve_email_attachments(
+    attachments: str | list[str] | None,
+    attachments_inline: list[dict[str, str]] | None,
+) -> list[tuple[str, bytes]]:
+    """Resolve email attachments from local paths and/or inline base64.
+
+    ``attachments`` are local file paths (server-side filesystem, stdio only).
+    ``attachments_inline`` is a list of ``{"name": str, "content_base64": str}``
+    objects, required for remote/HTTP deployments where the server cannot read
+    the client's filesystem. Both may be combined. Returns ``(name, bytes)``.
+    """
+    resolved: list[tuple[str, bytes]] = []
+
+    if attachments:
+        paths = [attachments] if isinstance(attachments, str) else attachments
+        for file_path in paths:
+            path = pl.Path(file_path).expanduser().resolve()
+            resolved.append((path.name, path.read_bytes()))
+
+    if attachments_inline:
+        for att in attachments_inline:
+            name = att.get("name")
+            content_base64 = att.get("content_base64")
+            if not name or content_base64 is None:
+                raise ValueError(
+                    "Each inline attachment needs 'name' and 'content_base64'"
+                )
+            resolved.append((name, _resolve_file_bytes(content_base64, None)))
+
+    return resolved
 
 
 @mcp.tool
