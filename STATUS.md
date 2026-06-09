@@ -9,7 +9,7 @@ https://brandart-mcp-gateway.jollyfield-bcd8d619.westeurope.azurecontainerapps.i
 Connettori → "Brandart Microsoft 365" → URL sopra → lascia Advanced Settings vuote
 
 ## Risorse Azure (rg-brandart-mcp, westeurope)
-- Container App: `brandart-mcp-gateway` (image **v0.2.12** — read_attachment_text generic reader + 11 formati)
+- Container App: `brandart-mcp-gateway` (image **v0.2.13** — read/download tool descriptions directive, rev 0000016)
 - Container Registry: `acrbrandartmcp.azurecr.io`
 - Key Vault: `kv-brandart-mcp` (secrets: entra-client-secret, jwt-signing-key, redis-connection-string)
 - App Insights: `appi-brandart-mcp`
@@ -38,6 +38,7 @@ az containerapp revision restart -g rg-brandart-mcp -n brandart-mcp-gateway --re
 ```
 
 ## Storia versioni deploy
+- **v0.2.13** (9 Jun 2026) — solo docstring (no logic). Il modello sceglieva `get_event_attachment` (download) quando l'utente chiedeva di LEGGERE → dead-end su base64. Descrizioni rese direttive: read_* = "USE THIS to read/open/view contents", get_* = "DOWNLOAD ... NOT for reading". Revision `0000016`. Commit `5594dc0`.
 - **v0.2.12** (9 Jun 2026) — lettura generica "qualsiasi file". Nuovo tool `read_attachment_text` (account_id + una sorgente: event_id+attachment_id | email_id+attachment_id | onedrive_file_id) → estrae TESTO lato server per: text/csv/tsv/md/json/xml/yaml, xlsx/xlsm/ods, pdf, docx/odt, pptx, rtf, html, eml, msg. Mai base64. Motore `_extract_text` esteso (deps: python-pptx, striprtf, odfpy, beautifulsoup4, extract-msg). OneDrive read via `@microsoft.graph.downloadUrl` in-memory. Unsupported (immagini, .doc/.xls/.ppt legacy, archivi) → kind=unsupported + hint download. NB: Claude Desktop cachea la tool-list → ricaricare il connettore dopo il deploy. Revision `0000015`. Commit `576b47d`.
 - **v0.2.11** (9 Jun 2026) — fix definitivo blocco lettura allegato. Root cause vero (NON la dimensione): `get_event_attachment` ritornava i byte come base64 nel tool result; anche un xlsx da 28KB veniva rimbalzato a `create_file` e il blob base64 nel context bloccava Claude Desktop (e comunque xlsx/pdf non sono leggibili dai byte grezzi). Best practice MCP (modelcontextprotocol.io / llmindset): i byte NON devono mai entrare nel context. Soluzione: nuovo tool `read_event_attachment` che estrae TESTO lato server (openpyxl/pypdf/python-docx/csv/txt) e ritorna solo testo; `get_event_attachment` ora carica su OneDrive e ritorna `web_url` (mai base64). Deps: openpyxl, pypdf, python-docx. Revision `0000014`. Commit `d544a7a`.
 - **v0.2.10** (9 Jun 2026) — fix blocco lettura allegato grande su Claude Desktop. `get_event_attachment` ritornava tutto il base64 inline → un PDF biglietto (centinaia di KB / MB) saturava il context del modello e bloccava il client (server logava 200 OK, non era un crash backend). Ora: inline solo se ≤256 KB (`max_inline_size`), altrimenti upload su OneDrive (`Attachments/Events/`) + ritorna `onedrive_file_id`+`web_url`. Messaggio chiaro per referenceAttachment. Revision `0000013`. Commit `2436f7b`.
