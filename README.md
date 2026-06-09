@@ -69,7 +69,8 @@ claude
 - **`check_availability`** - Check free/busy times for scheduling
 - **`search_events`** - Search calendar events
 - **`list_event_attachments`** - List attachments of a calendar event (id, name, contentType, size)
-- **`get_event_attachment`** - Download an event attachment (inline base64 or save to disk)
+- **`get_event_attachment`** - Download an event attachment to OneDrive (returns `web_url`, never inline bytes) or to disk via `save_path`
+- **`read_event_attachment`** - Read an event attachment as text (server-side extraction: xlsx/pdf/docx/csv/txt)
 
 ### Contact Tools
 - **`list_contacts`** - List all contacts

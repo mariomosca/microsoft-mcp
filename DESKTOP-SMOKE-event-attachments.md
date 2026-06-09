@@ -29,33 +29,41 @@ Usa list_event_attachments su quell'evento e mostrami nome, content type e dimen
 
 Atteso: una o piu' righe con `name`, `content_type`, `size`, `is_inline` e un `id` per ciascun allegato.
 
-## Passo 3 — scarica il contenuto (use case CEO)
+## Passo 3a — LEGGERE il contenuto (use case CEO)
 ```
-Scarica il primo allegato di quell'evento con get_event_attachment e, se e' un biglietto aereo o un PDF, estrai il PNR e gli orari del volo.
+Leggi il primo allegato di quell'evento con read_event_attachment. Se e' un biglietto aereo estrai PNR e orari; se e' una scheda costi riassumi le voci.
 ```
 
 Atteso:
-- la call ritorna `content_base64` (contenuto inline, niente errori di filesystem),
-- Claude decodifica e legge il contenuto,
-- se e' un biglietto: PNR + orari estratti correttamente.
+- la call ritorna `kind` (xlsx/pdf/docx/csv/text) + `text` (contenuto estratto lato server),
+- NESSUN `content_base64` nel risultato — il binario non entra mai nel context,
+- Claude legge il testo e risponde (PNR/orari, oppure sintesi della scheda costi).
+
+## Passo 3b — SCARICARE il file (opzionale)
+```
+Scarica quell'allegato con get_event_attachment e dammi il link.
+```
+
+Atteso: la call carica il file su OneDrive (`Attachments/Events/`) e ritorna
+`onedrive_file_id` + `web_url`. Claude ti da' il link; i byte non passano dal context.
 
 ## Cosa conferma il PASS
 - `list_event_attachments` ritorna metadata coerenti con l'allegato reale.
-- `get_event_attachment`:
-  - allegato **piccolo** (<=256 KB): ritorna `content_base64` valido, Claude lo legge inline.
-  - allegato **grande** (>256 KB, es. PDF biglietto): NON ritorna il base64 (bloccherebbe
-    il client). Lo carica su OneDrive in `Attachments/Events/` e ritorna
-    `staged_to_onedrive: true` + `onedrive_file_id` + `web_url`. Claude puo' poi
-    aprire il link o usare `get_file`. Questo e' il fix del blocco osservato in v0.2.9.
-- Il contenuto e' leggibile (inline o via il file OneDrive).
+- `read_event_attachment` ritorna `text` leggibile (xlsx/pdf/docx/csv/txt), MAI base64.
+  Per immagini/altri binari: `kind=unsupported` + nota che rimanda a get_event_attachment.
+- `get_event_attachment` ritorna `web_url` OneDrive, MAI base64 inline.
+- In NESSUN caso Claude resta a "scrivere/decodificare base64" (il blocco di v0.2.9/v0.2.10).
 
-> **Nota soglia (v0.2.10)**: la soglia inline e' 256 KB. Per forzare l'inline anche
-> su file grandi (sconsigliato via Desktop): passare `max_inline_size` piu' alto.
+## Architettura (perche' cosi')
+I byte di un allegato non devono MAI entrare nel context del modello: un blob base64
+in un tool result satura il context e blocca il client (e comunque il modello non puo'
+leggere xlsx/pdf dai byte grezzi). Best practice MCP: estrarre testo lato server
+(`read_event_attachment`) per leggere, e ritornare un link (`get_event_attachment` →
+OneDrive) per scaricare. Vedi commit/STATUS v0.2.11.
 
 ## Se fallisce
-- Errore auth/401 → ri-autentica il connettore (Redis dovrebbe persistere lo state,
-  ma un re-OAuth risolve).
-- "Attachment content not available" → l'allegato e' di tipo reference (link, non
-  fileAttachment). Graph non espone `contentBytes` per quelli; e' un limite noto
-  dell'API, non un bug del connettore. Prova con un allegato file vero.
-- Tool non presente nella lista → il deploy non e' v0.2.9; rifai il redeploy.
+- Errore auth/401 → ri-autentica il connettore (Redis persiste lo state, ma un re-OAuth risolve).
+- "reference attachment (link)" → l'allegato e' un link (referenceAttachment), non un file:
+  Graph non espone bytes. Prova con un allegato file vero.
+- `kind=unsupported` su un formato che ti aspettavi testuale → dimmelo, aggiungo il parser.
+- Tool non presente → il deploy non e' v0.2.11; rifai il redeploy.

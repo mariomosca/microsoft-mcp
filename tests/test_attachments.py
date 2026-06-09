@@ -107,46 +107,52 @@ def test_list_event_attachments_maps_metadata(monkeypatch):
     ]
 
 
-def test_get_event_attachment_inline_base64(monkeypatch):
-    payload = b"PNR-ABC123 flight 09:40"
-    b64 = base64.b64encode(payload).decode("utf-8")
-
-    def fake_request(method, path, account_id=None, **kwargs):
-        assert method == "GET"
-        assert path == "/me/events/evt-1/attachments/att-1"
-        return {
-            "name": "ticket.pdf",
-            "contentType": "application/pdf",
-            "size": len(payload),
+def _mock_attachment(monkeypatch, name, content_type, raw: bytes):
+    b64 = base64.b64encode(raw).decode("utf-8")
+    monkeypatch.setattr(
+        tools.graph,
+        "request",
+        lambda *a, **k: {
+            "name": name,
+            "contentType": content_type,
+            "size": len(raw),
             "contentBytes": b64,
-        }
+        },
+    )
 
-    monkeypatch.setattr(tools.graph, "request", fake_request)
+
+# --- get_event_attachment: NEVER inline base64 over HTTP --------------------
+
+
+def test_get_event_attachment_http_stages_to_onedrive(monkeypatch):
+    raw = b"PNR-ABC123 flight 09:40"
+    _mock_attachment(monkeypatch, "ticket.pdf", "application/pdf", raw)
+
+    uploaded = {}
+
+    def fake_upload(path, data, account_id=None, item_properties=None):
+        uploaded["path"] = path
+        uploaded["bytes"] = len(data)
+        return {"id": "drive-item-1", "webUrl": "https://onedrive/ticket.pdf"}
+
+    monkeypatch.setattr(tools.graph, "upload_large_file", fake_upload)
 
     out = tools.get_event_attachment(
         event_id="evt-1", attachment_id="att-1", account_id="acc-1"
     )
 
-    assert out["name"] == "ticket.pdf"
-    assert out["content_type"] == "application/pdf"
-    assert out["content_base64"] == b64
-    assert "saved_to" not in out
+    # the key regression guard: bytes are NEVER returned inline
+    assert "content_base64" not in out
+    assert out["onedrive_file_id"] == "drive-item-1"
+    assert out["web_url"] == "https://onedrive/ticket.pdf"
+    assert out["onedrive_path"] == "Attachments/Events/ticket.pdf"
+    assert uploaded["bytes"] == len(raw)
+    assert uploaded["path"] == "/me/drive/root:/Attachments/Events/ticket.pdf:"
 
 
 def test_get_event_attachment_save_path(monkeypatch, tmp_path):
-    payload = b"binary-bytes"
-    b64 = base64.b64encode(payload).decode("utf-8")
-
-    monkeypatch.setattr(
-        tools.graph,
-        "request",
-        lambda *a, **k: {
-            "name": "f.bin",
-            "contentType": "application/octet-stream",
-            "size": len(payload),
-            "contentBytes": b64,
-        },
-    )
+    raw = b"binary-bytes"
+    _mock_attachment(monkeypatch, "f.bin", "application/octet-stream", raw)
 
     dest = tmp_path / "out" / "f.bin"
     out = tools.get_event_attachment(
@@ -156,7 +162,7 @@ def test_get_event_attachment_save_path(monkeypatch, tmp_path):
         save_path=str(dest),
     )
 
-    assert dest.read_bytes() == payload
+    assert dest.read_bytes() == raw
     assert out["saved_to"] == str(dest.resolve())
     assert "content_base64" not in out
 
@@ -173,65 +179,69 @@ def test_get_event_attachment_missing_content_raises(monkeypatch):
         )
 
 
-def test_get_event_attachment_large_stages_to_onedrive(monkeypatch):
-    # 300 KB payload, default inline cap is 256 KB -> must go to OneDrive.
-    payload = b"x" * (300 * 1024)
-    b64 = base64.b64encode(payload).decode("utf-8")
+# --- read_event_attachment: server-side text extraction ---------------------
 
-    monkeypatch.setattr(
-        tools.graph,
-        "request",
-        lambda *a, **k: {
-            "name": "boarding-pass.pdf",
-            "contentType": "application/pdf",
-            "size": len(payload),
-            "contentBytes": b64,
-        },
+
+def test_read_event_attachment_xlsx(monkeypatch):
+    import io
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Costi"
+    ws.append(["Voce", "Importo"])
+    ws.append(["Hotel", 120])
+    ws.append(["Volo", 350])
+    buf = io.BytesIO()
+    wb.save(buf)
+    raw = buf.getvalue()
+
+    _mock_attachment(
+        monkeypatch,
+        "FORM SCHEDA COSTI.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        raw,
     )
 
-    uploaded = {}
-
-    def fake_upload(path, data, account_id=None, item_properties=None):
-        uploaded["path"] = path
-        uploaded["bytes"] = len(data)
-        return {"id": "drive-item-99", "webUrl": "https://onedrive/boarding-pass.pdf"}
-
-    monkeypatch.setattr(tools.graph, "upload_large_file", fake_upload)
-
-    out = tools.get_event_attachment(
+    out = tools.read_event_attachment(
         event_id="evt-1", attachment_id="att-1", account_id="acc-1"
     )
-
-    # bytes were NOT pushed inline
+    assert out["kind"] == "xlsx"
     assert "content_base64" not in out
-    assert out["staged_to_onedrive"] is True
-    assert out["onedrive_file_id"] == "drive-item-99"
-    assert out["web_url"] == "https://onedrive/boarding-pass.pdf"
-    assert out["onedrive_path"] == "Attachments/Events/boarding-pass.pdf"
-    # the real bytes were uploaded, to the expected drive path
-    assert uploaded["bytes"] == len(payload)
-    assert uploaded["path"] == "/me/drive/root:/Attachments/Events/boarding-pass.pdf:"
+    assert "Costi" in out["text"]
+    assert "Hotel" in out["text"]
+    assert "350" in out["text"]
 
 
-def test_get_event_attachment_large_inline_when_cap_raised(monkeypatch):
-    payload = b"y" * (300 * 1024)
-    b64 = base64.b64encode(payload).decode("utf-8")
-    monkeypatch.setattr(
-        tools.graph,
-        "request",
-        lambda *a, **k: {
-            "name": "big.pdf",
-            "contentType": "application/pdf",
-            "size": len(payload),
-            "contentBytes": b64,
-        },
+def test_read_event_attachment_csv(monkeypatch):
+    raw = b"col1,col2\na,1\nb,2\n"
+    _mock_attachment(monkeypatch, "data.csv", "text/csv", raw)
+
+    out = tools.read_event_attachment(
+        event_id="e", attachment_id="a", account_id="acc"
     )
+    assert out["kind"] == "csv"
+    assert out["text"] == "col1,col2\na,1\nb,2\n"
 
-    out = tools.get_event_attachment(
-        event_id="evt-1",
-        attachment_id="att-1",
-        account_id="acc-1",
-        max_inline_size=1024 * 1024,  # raise cap -> force inline
+
+def test_read_event_attachment_text_truncates(monkeypatch):
+    raw = ("x" * 100).encode()
+    _mock_attachment(monkeypatch, "big.txt", "text/plain", raw)
+
+    out = tools.read_event_attachment(
+        event_id="e", attachment_id="a", account_id="acc", max_chars=10
     )
-    assert out["content_base64"] == b64
-    assert "staged_to_onedrive" not in out
+    assert out["truncated"] is True
+    assert len(out["text"]) == 10
+
+
+def test_read_event_attachment_unsupported_image(monkeypatch):
+    raw = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+    _mock_attachment(monkeypatch, "photo.png", "image/png", raw)
+
+    out = tools.read_event_attachment(
+        event_id="e", attachment_id="a", account_id="acc"
+    )
+    assert out["kind"] == "unsupported"
+    assert out["text"] is None
+    assert "get_event_attachment" in out["note"]

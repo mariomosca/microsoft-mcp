@@ -1049,11 +1049,88 @@ def list_event_attachments(
     ]
 
 
-# Inline base64 in a tool result must stay small: a multi-hundred-KB blob
-# floods the LLM context and effectively hangs the client. Above this many
-# bytes (decoded), get_event_attachment stages the file to OneDrive and
-# returns a link instead of the bytes. ~256 KB keeps small tickets/QR inline.
-EVENT_ATTACHMENT_INLINE_MAX_BYTES = 256 * 1024
+def _fetch_event_attachment_bytes(
+    event_id: str, attachment_id: str, account_id: str
+) -> tuple[str, str, bytes]:
+    """Fetch a single event fileAttachment. Returns (name, content_type, raw bytes).
+
+    Raises ValueError for missing or reference (link) attachments.
+    """
+    result = graph.request(
+        "GET",
+        f"/me/events/{event_id}/attachments/{attachment_id}",
+        account_id,
+    )
+    if not result:
+        raise ValueError("Attachment not found")
+    if "contentBytes" not in result:
+        raise ValueError(
+            "Attachment content not available - this is likely a reference "
+            "attachment (link), which has no downloadable bytes. Open it from "
+            "the link instead."
+        )
+    return (
+        result.get("name", "unknown"),
+        result.get("contentType", "application/octet-stream"),
+        base64.b64decode(result["contentBytes"]),
+    )
+
+
+# How much extracted text to return at most, to avoid flooding the context.
+ATTACHMENT_TEXT_MAX_CHARS = 50_000
+
+
+def _extract_text(name: str, content_type: str, raw: bytes) -> tuple[str, str]:
+    """Best-effort server-side text extraction. Returns (kind, text).
+
+    Never returns binary to the model: spreadsheets/pdf/docx/csv/txt are parsed
+    to plain text here so the client can read them without a base64 round-trip.
+    ``kind`` is a short label (xlsx/pdf/docx/csv/text/unsupported).
+    """
+    lower = name.lower()
+    ext = lower.rsplit(".", 1)[-1] if "." in lower else ""
+
+    # Plain text / CSV: decode directly.
+    if ext in ("txt", "csv", "tsv", "md", "json", "xml", "log") or content_type.startswith(
+        "text/"
+    ):
+        text = raw.decode("utf-8", errors="replace")
+        return ("csv" if ext in ("csv", "tsv") else "text", text)
+
+    # Excel spreadsheets.
+    if ext in ("xlsx", "xlsm"):
+        import io
+        import openpyxl
+
+        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        parts: list[str] = []
+        for ws in wb.worksheets:
+            parts.append(f"### Sheet: {ws.title}")
+            for row in ws.iter_rows(values_only=True):
+                cells = ["" if c is None else str(c) for c in row]
+                if any(cells):
+                    parts.append("\t".join(cells))
+        wb.close()
+        return ("xlsx", "\n".join(parts))
+
+    # PDF.
+    if ext == "pdf" or content_type == "application/pdf":
+        import io
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(raw))
+        pages = [(p.extract_text() or "") for p in reader.pages]
+        return ("pdf", "\n\n".join(f"--- page {i + 1} ---\n{t}" for i, t in enumerate(pages)))
+
+    # Word.
+    if ext == "docx":
+        import io
+        import docx
+
+        d = docx.Document(io.BytesIO(raw))
+        return ("docx", "\n".join(p.text for p in d.paragraphs))
+
+    return ("unsupported", "")
 
 
 @mcp.tool
@@ -1062,52 +1139,35 @@ def get_event_attachment(
     attachment_id: str,
     account_id: str,
     save_path: str | None = None,
-    max_inline_size: int = EVENT_ATTACHMENT_INLINE_MAX_BYTES,
     onedrive_folder: str = "Attachments/Events",
 ) -> dict[str, Any]:
-    """Download a calendar event attachment.
+    """Download a calendar event attachment WITHOUT pushing bytes to the model.
 
-    Behaviour (mirrors ``get_attachment`` for email, with a size guard):
+    The attachment content is never returned inline as base64: a base64 blob in
+    a tool result floods the LLM context and hangs the client (and the model
+    cannot reconstruct binary formats anyway). Instead:
 
     - ``save_path`` set -> write the bytes to the server filesystem (local
       stdio only) and return ``saved_to``.
-    - small attachment (decoded size <= ``max_inline_size``) -> return the
-      bytes inline as base64 in ``content_base64`` (ready to pass to
-      ``create_file(content_base64=...)``).
-    - large attachment over HTTP (no ``save_path``) -> the bytes are NOT
-      returned inline (a big base64 blob hangs the LLM client). Instead the
-      file is uploaded to OneDrive under ``onedrive_folder`` and the response
-      carries ``onedrive_file_id`` + ``web_url`` so the file stays accessible
-      without flooding the context. Set ``max_inline_size`` higher to force
-      inline if you really need the bytes.
+    - otherwise (HTTP/remote) -> upload the file to OneDrive under
+      ``onedrive_folder`` and return ``onedrive_file_id`` + ``web_url``. The
+      model gets a link it can hand to the user or open; the bytes stay out of
+      the conversation.
+
+    To let the model READ the contents (spreadsheet/pdf/etc), use
+    ``read_event_attachment`` instead, which returns extracted text.
 
     Only ``fileAttachment`` types carry content; ``referenceAttachment`` (link
-    attachments, e.g. a OneDrive link on the event) have no bytes and raise.
+    attachments) have no bytes and raise.
     """
-    result = graph.request(
-        "GET",
-        f"/me/events/{event_id}/attachments/{attachment_id}",
-        account_id,
+    name, content_type, raw = _fetch_event_attachment_bytes(
+        event_id, attachment_id, account_id
     )
-
-    if not result:
-        raise ValueError("Attachment not found")
-
-    if "contentBytes" not in result:
-        raise ValueError(
-            "Attachment content not available - this is likely a reference "
-            "attachment (link), which has no downloadable bytes. Open it from "
-            "the link instead."
-        )
-
-    name = result.get("name", "unknown")
     response: dict[str, Any] = {
         "name": name,
-        "content_type": result.get("contentType", "application/octet-stream"),
-        "size": result.get("size", 0),
+        "content_type": content_type,
+        "size": len(raw),
     }
-
-    raw = base64.b64decode(result["contentBytes"])
 
     if save_path is not None:
         # Local stdio: persist to the server filesystem.
@@ -1115,27 +1175,74 @@ def get_event_attachment(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
         response["saved_to"] = str(path)
-    elif len(raw) <= max_inline_size:
-        # Small enough: return the bytes inline (already base64 from Graph).
-        response["content_base64"] = result["contentBytes"]
     else:
-        # Too large to inline over HTTP: stage to OneDrive and return a link
-        # so we never push megabytes of base64 into the model context.
+        # Remote/HTTP: stage to OneDrive, return a link (never the bytes).
         onedrive_path = f"{onedrive_folder.strip('/')}/{name}"
         uploaded = graph.upload_large_file(
             f"/me/drive/root:/{onedrive_path}:", raw, account_id
         )
-        response["staged_to_onedrive"] = True
         response["onedrive_path"] = onedrive_path
         response["onedrive_file_id"] = uploaded.get("id")
         response["web_url"] = uploaded.get("webUrl")
         response["note"] = (
-            f"Attachment ({len(raw)} bytes) exceeded the inline limit "
-            f"({max_inline_size} bytes) and was saved to OneDrive at "
-            f"'{onedrive_path}'. Use get_file(file_id=onedrive_file_id, ...) "
-            "or open web_url to access it."
+            f"Saved to OneDrive at '{onedrive_path}'. Open web_url to view/"
+            "download, or use read_event_attachment to read its contents as text."
         )
 
+    return response
+
+
+@mcp.tool
+def read_event_attachment(
+    event_id: str,
+    attachment_id: str,
+    account_id: str,
+    max_chars: int = ATTACHMENT_TEXT_MAX_CHARS,
+) -> dict[str, Any]:
+    """Read a calendar event attachment as TEXT (server-side extraction).
+
+    Downloads the attachment and extracts plain text on the server, so the
+    model can read it without ever receiving base64. Supported:
+
+    - xlsx/xlsm -> sheets and cells as tab-separated text
+    - pdf       -> extracted text per page
+    - docx      -> paragraph text
+    - csv/tsv/txt/md/json/xml/log and any text/* -> decoded directly
+
+    For unsupported binary types (e.g. images), no text is returned: use
+    ``get_event_attachment`` to stage the file to OneDrive and open ``web_url``.
+
+    Output text is truncated to ``max_chars`` to protect the context.
+    """
+    name, content_type, raw = _fetch_event_attachment_bytes(
+        event_id, attachment_id, account_id
+    )
+    kind, text = _extract_text(name, content_type, raw)
+
+    response: dict[str, Any] = {
+        "name": name,
+        "content_type": content_type,
+        "size": len(raw),
+        "kind": kind,
+    }
+
+    if kind == "unsupported":
+        response["text"] = None
+        response["note"] = (
+            f"Cannot extract text from '{name}' ({content_type}). Use "
+            "get_event_attachment to save it to OneDrive and open the link."
+        )
+        return response
+
+    truncated = len(text) > max_chars
+    response["text"] = text[:max_chars]
+    response["truncated"] = truncated
+    if truncated:
+        response["note"] = (
+            f"Text truncated to {max_chars} of {len(text)} chars. Raise "
+            "max_chars or open the file in OneDrive (get_event_attachment) "
+            "for the full content."
+        )
     return response
 
 
