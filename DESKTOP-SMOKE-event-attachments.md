@@ -6,8 +6,17 @@ contro il deploy Azure, dal connettore **"Brandart Microsoft 365"**.
 Questo e' l'UNICO path che esercita davvero l'auth OBO reale (il token Graph
 e' iniettato per-request dal connettore — non testabile via `az containerapp exec`).
 
+## ⚠️ IMPORTANTE — ricarica la tool-list dopo ogni deploy
+Claude Desktop **cachea la lista dei tool** del connettore. Dopo un redeploy che
+aggiunge/cambia tool (es. `read_event_attachment`, `read_attachment_text`), il
+connettore puo' continuare a vedere la lista vecchia → il modello non trova il
+tool nuovo e si arrangia con quello vecchio (questo spiega i blocchi su base64).
+**Forza il refresh**: disattiva e riattiva il connettore "Brandart Microsoft 365"
+(o riavvia Claude Desktop) prima di testare. Verifica che `read_attachment_text`
+compaia tra i tool disponibili.
+
 ## Prerequisiti
-- Deploy v0.2.9 attivo (vedi STATUS.md → Redeploy).
+- Deploy v0.2.12+ attivo (vedi STATUS.md → Redeploy).
 - Connettore "Brandart Microsoft 365" gia' configurato e autenticato in Claude Desktop.
 - Un evento in calendario con un allegato. Se non ne hai: crea un appuntamento
   qualsiasi su Outlook e allega un PDF/PNG (es. un biglietto). Va bene anche

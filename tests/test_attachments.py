@@ -245,3 +245,102 @@ def test_read_event_attachment_unsupported_image(monkeypatch):
     assert out["kind"] == "unsupported"
     assert out["text"] is None
     assert "get_event_attachment" in out["note"]
+
+
+# --- _extract_text: extended formats ----------------------------------------
+
+
+def test_extract_html():
+    raw = b"<html><body><h1>Titolo</h1><p>Ciao</p><script>x()</script></body></html>"
+    kind, text = tools._extract_text("page.html", "text/html", raw)
+    assert kind == "html"
+    assert "Titolo" in text and "Ciao" in text
+    assert "x()" not in text  # script stripped
+
+
+def test_extract_rtf():
+    raw = rb"{\rtf1\ansi Hello \b world\b0 .}"
+    kind, text = tools._extract_text("note.rtf", "application/rtf", raw)
+    assert kind == "rtf"
+    assert "Hello" in text and "world" in text
+
+
+def test_extract_pptx():
+    import io
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1))
+    box.text_frame.text = "Budget Q3"
+    buf = io.BytesIO()
+    prs.save(buf)
+
+    kind, text = tools._extract_text("deck.pptx", "application/vnd.ms-powerpoint", buf.getvalue())
+    assert kind == "pptx"
+    assert "Budget Q3" in text
+
+
+def test_extract_eml():
+    raw = (
+        b"From: a@x.com\r\nTo: b@y.com\r\nSubject: Test\r\n"
+        b"Content-Type: text/plain\r\n\r\nCorpo della mail.\r\n"
+    )
+    kind, text = tools._extract_text("m.eml", "message/rfc822", raw)
+    assert kind == "eml"
+    assert "Subject: Test" in text
+    assert "Corpo della mail." in text
+
+
+def test_extract_unsupported_image():
+    kind, text = tools._extract_text("x.png", "image/png", b"\x89PNG\r\n")
+    assert kind == "unsupported"
+    assert text == ""
+
+
+# --- read_attachment_text: generic multi-source reader ----------------------
+
+
+def test_read_attachment_text_requires_a_source():
+    with pytest.raises(ValueError, match="Provide a source"):
+        tools.read_attachment_text(account_id="acc")
+
+
+def test_read_attachment_text_from_event(monkeypatch):
+    raw = b"plain ticket PNR-XYZ"
+    _mock_attachment(monkeypatch, "t.txt", "text/plain", raw)
+    out = tools.read_attachment_text(
+        account_id="acc", event_id="e", attachment_id="a"
+    )
+    assert out["kind"] == "text"
+    assert "PNR-XYZ" in out["text"]
+
+
+def test_read_attachment_text_from_onedrive(monkeypatch):
+    raw = b"col1,col2\nx,1\n"
+
+    monkeypatch.setattr(
+        tools.graph,
+        "request",
+        lambda *a, **k: {
+            "name": "data.csv",
+            "file": {"mimeType": "text/csv"},
+            "size": len(raw),
+            "@microsoft.graph.downloadUrl": "https://dl/data.csv",
+        },
+    )
+
+    class FakeResp:
+        content = raw
+
+        def raise_for_status(self):
+            pass
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: FakeResp())
+
+    out = tools.read_attachment_text(account_id="acc", onedrive_file_id="file-1")
+    assert out["kind"] == "csv"
+    assert out["text"] == "col1,col2\nx,1\n"

@@ -71,6 +71,7 @@ claude
 - **`list_event_attachments`** - List attachments of a calendar event (id, name, contentType, size)
 - **`get_event_attachment`** - Download an event attachment to OneDrive (returns `web_url`, never inline bytes) or to disk via `save_path`
 - **`read_event_attachment`** - Read an event attachment as text (server-side extraction: xlsx/pdf/docx/csv/txt)
+- **`read_attachment_text`** - Read ANY supported file as text from any source (event/email attachment or OneDrive file): text/csv/xlsx/ods/pdf/docx/odt/pptx/rtf/html/eml/msg
 
 ### Contact Tools
 - **`list_contacts`** - List all contacts

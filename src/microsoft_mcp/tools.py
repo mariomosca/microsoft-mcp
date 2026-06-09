@@ -1083,23 +1083,49 @@ ATTACHMENT_TEXT_MAX_CHARS = 50_000
 def _extract_text(name: str, content_type: str, raw: bytes) -> tuple[str, str]:
     """Best-effort server-side text extraction. Returns (kind, text).
 
-    Never returns binary to the model: spreadsheets/pdf/docx/csv/txt are parsed
-    to plain text here so the client can read them without a base64 round-trip.
-    ``kind`` is a short label (xlsx/pdf/docx/csv/text/unsupported).
+    Never returns binary to the model: the file is parsed to plain text here so
+    the client can read it without a base64 round-trip. ``kind`` is a short
+    label (text/csv/xlsx/pdf/docx/pptx/rtf/odf/html/eml/msg/unsupported).
+
+    Supported today:
+      text/csv/tsv/md/json/xml/log/yaml + any text/*  -> decoded
+      xlsx/xlsm/ods                                   -> cells as TSV
+      pdf                                             -> text per page
+      docx/odt                                        -> paragraph text
+      pptx                                            -> slide text
+      rtf                                             -> stripped text
+      html/htm                                        -> visible text
+      eml                                             -> headers + body
+      msg (Outlook)                                   -> headers + body
+
+    Unsupported (returns kind=unsupported, no text): images, legacy .doc/.ppt/
+    .xls binary formats, archives, and anything else. Caller should fall back to
+    downloading the file (web_url / save_path).
     """
+    import io
+
     lower = name.lower()
     ext = lower.rsplit(".", 1)[-1] if "." in lower else ""
 
-    # Plain text / CSV: decode directly.
-    if ext in ("txt", "csv", "tsv", "md", "json", "xml", "log") or content_type.startswith(
-        "text/"
-    ):
+    # 0. HTML first (its content_type is text/html, which would otherwise be
+    #    swallowed by the plain-text catch-all below).
+    if ext in ("html", "htm") or content_type == "text/html":
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(raw, "html.parser")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        return ("html", soup.get_text(separator="\n", strip=True))
+
+    # 1. Plain text / structured text.
+    if ext in (
+        "txt", "csv", "tsv", "md", "json", "xml", "log", "yaml", "yml", "ini", "conf"
+    ) or content_type.startswith("text/"):
         text = raw.decode("utf-8", errors="replace")
         return ("csv" if ext in ("csv", "tsv") else "text", text)
 
-    # Excel spreadsheets.
+    # 2. Excel + ODS spreadsheets (cells as tab-separated rows).
     if ext in ("xlsx", "xlsm"):
-        import io
         import openpyxl
 
         wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
@@ -1113,22 +1139,107 @@ def _extract_text(name: str, content_type: str, raw: bytes) -> tuple[str, str]:
         wb.close()
         return ("xlsx", "\n".join(parts))
 
-    # PDF.
+    if ext == "ods":
+        from odf.opendocument import load as odf_load
+        from odf.table import Table, TableRow, TableCell
+        from odf.text import P as OdfP
+
+        doc = odf_load(io.BytesIO(raw))
+        parts = []
+        for table in doc.getElementsByType(Table):
+            parts.append(f"### Sheet: {table.getAttribute('name')}")
+            for row in table.getElementsByType(TableRow):
+                cells = []
+                for cell in row.getElementsByType(TableCell):
+                    cells.append(
+                        " ".join(str(p) for p in cell.getElementsByType(OdfP))
+                    )
+                if any(cells):
+                    parts.append("\t".join(cells))
+        return ("xlsx", "\n".join(parts))
+
+    # 3. PDF.
     if ext == "pdf" or content_type == "application/pdf":
-        import io
         from pypdf import PdfReader
 
         reader = PdfReader(io.BytesIO(raw))
         pages = [(p.extract_text() or "") for p in reader.pages]
         return ("pdf", "\n\n".join(f"--- page {i + 1} ---\n{t}" for i, t in enumerate(pages)))
 
-    # Word.
+    # 4. Word.
     if ext == "docx":
-        import io
         import docx
 
         d = docx.Document(io.BytesIO(raw))
         return ("docx", "\n".join(p.text for p in d.paragraphs))
+
+    if ext == "odt":
+        from odf.opendocument import load as odf_load
+        from odf.text import P as OdfP
+        from odf import teletype
+
+        doc = odf_load(io.BytesIO(raw))
+        paras = [teletype.extractText(p) for p in doc.getElementsByType(OdfP)]
+        return ("docx", "\n".join(paras))
+
+    # 5. PowerPoint (slide text).
+    if ext == "pptx":
+        from pptx import Presentation
+
+        prs = Presentation(io.BytesIO(raw))
+        parts = []
+        for i, slide in enumerate(prs.slides, 1):
+            parts.append(f"--- slide {i} ---")
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        line = "".join(run.text for run in para.runs)
+                        if line:
+                            parts.append(line)
+        return ("pptx", "\n".join(parts))
+
+    # 6. RTF.
+    if ext == "rtf" or content_type == "application/rtf":
+        from striprtf.striprtf import rtf_to_text
+
+        return ("rtf", rtf_to_text(raw.decode("utf-8", errors="replace")))
+
+    # 8. Email .eml (RFC822, stdlib).
+    if ext == "eml" or content_type == "message/rfc822":
+        import email
+        from email import policy
+
+        msg = email.message_from_bytes(raw, policy=policy.default)
+        headers = "\n".join(
+            f"{h}: {msg[h]}" for h in ("From", "To", "Cc", "Subject", "Date") if msg[h]
+        )
+        body_part = msg.get_body(preferencelist=("plain", "html"))
+        body = body_part.get_content() if body_part else ""
+        if body_part is not None and body_part.get_content_type() == "text/html":
+            from bs4 import BeautifulSoup
+
+            body = BeautifulSoup(body, "html.parser").get_text(separator="\n", strip=True)
+        return ("eml", f"{headers}\n\n{body}")
+
+    # 9. Outlook .msg.
+    if ext == "msg":
+        import extract_msg
+
+        m = extract_msg.Message(io.BytesIO(raw))
+        headers = "\n".join(
+            f"{label}: {val}"
+            for label, val in (
+                ("From", m.sender),
+                ("To", m.to),
+                ("Cc", m.cc),
+                ("Subject", m.subject),
+                ("Date", m.date),
+            )
+            if val
+        )
+        body = m.body or ""
+        m.close()
+        return ("msg", f"{headers}\n\n{body}")
 
     return ("unsupported", "")
 
@@ -1244,6 +1355,112 @@ def read_event_attachment(
             "for the full content."
         )
     return response
+
+
+def _build_text_response(
+    name: str, content_type: str, raw: bytes, max_chars: int, download_hint: str
+) -> dict[str, Any]:
+    """Shared shaping for any 'read as text' tool."""
+    kind, text = _extract_text(name, content_type, raw)
+    response: dict[str, Any] = {
+        "name": name,
+        "content_type": content_type,
+        "size": len(raw),
+        "kind": kind,
+    }
+    if kind == "unsupported":
+        response["text"] = None
+        response["note"] = (
+            f"Cannot extract text from '{name}' ({content_type}). {download_hint}"
+        )
+        return response
+    truncated = len(text) > max_chars
+    response["text"] = text[:max_chars]
+    response["truncated"] = truncated
+    if truncated:
+        response["note"] = (
+            f"Text truncated to {max_chars} of {len(text)} chars. Raise max_chars."
+        )
+    return response
+
+
+def _download_onedrive_bytes(
+    file_id: str, account_id: str
+) -> tuple[str, str, bytes]:
+    """Download a OneDrive item's bytes into memory via its pre-auth download URL.
+
+    Returns (name, mime_type, raw). Uses @microsoft.graph.downloadUrl, which is
+    short-lived and pre-authenticated (no Authorization header needed).
+    """
+    import httpx
+
+    metadata = graph.request("GET", f"/me/drive/items/{file_id}", account_id)
+    if not metadata:
+        raise ValueError(f"File with ID {file_id} not found")
+    download_url = metadata.get("@microsoft.graph.downloadUrl")
+    if not download_url:
+        raise ValueError("No download URL available for this file")
+    resp = httpx.get(download_url, follow_redirects=True, timeout=60.0)
+    resp.raise_for_status()
+    name = metadata.get("name", "unknown")
+    mime = (metadata.get("file", {}) or {}).get("mimeType", "application/octet-stream")
+    return name, mime, resp.content
+
+
+@mcp.tool
+def read_attachment_text(
+    account_id: str,
+    event_id: str | None = None,
+    email_id: str | None = None,
+    attachment_id: str | None = None,
+    onedrive_file_id: str | None = None,
+    max_chars: int = ATTACHMENT_TEXT_MAX_CHARS,
+) -> dict[str, Any]:
+    """Read ANY supported file as TEXT, from any source, server-side.
+
+    One generic reader for the three sources - never returns base64, always
+    extracts text on the server (see _extract_text for supported formats:
+    text/csv/xlsx/ods/pdf/docx/odt/pptx/rtf/html/eml/msg).
+
+    Provide exactly one source:
+      - calendar event attachment:  event_id + attachment_id
+      - email attachment:           email_id + attachment_id
+      - OneDrive file:              onedrive_file_id
+
+    For unsupported binary types (images, legacy .doc/.xls/.ppt, archives) the
+    response has kind=unsupported and text=None; download the file instead
+    (get_event_attachment / get_attachment / get_file).
+    """
+    if event_id and attachment_id:
+        name, content_type, raw = _fetch_event_attachment_bytes(
+            event_id, attachment_id, account_id
+        )
+        hint = "Use get_event_attachment to save it to OneDrive."
+    elif email_id and attachment_id:
+        result = graph.request(
+            "GET", f"/me/messages/{email_id}/attachments/{attachment_id}", account_id
+        )
+        if not result:
+            raise ValueError("Attachment not found")
+        if "contentBytes" not in result:
+            raise ValueError(
+                "Attachment content not available - likely a reference (link) "
+                "attachment with no downloadable bytes."
+            )
+        name = result.get("name", "unknown")
+        content_type = result.get("contentType", "application/octet-stream")
+        raw = base64.b64decode(result["contentBytes"])
+        hint = "Use get_attachment to download it."
+    elif onedrive_file_id:
+        name, content_type, raw = _download_onedrive_bytes(onedrive_file_id, account_id)
+        hint = "Use get_file to download it."
+    else:
+        raise ValueError(
+            "Provide a source: (event_id + attachment_id), (email_id + "
+            "attachment_id), or onedrive_file_id."
+        )
+
+    return _build_text_response(name, content_type, raw, max_chars, hint)
 
 
 @mcp.tool
