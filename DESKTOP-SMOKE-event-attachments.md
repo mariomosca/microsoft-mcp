@@ -41,10 +41,16 @@ Atteso:
 
 ## Cosa conferma il PASS
 - `list_event_attachments` ritorna metadata coerenti con l'allegato reale.
-- `get_event_attachment` ritorna `content_base64` valido (NON un errore "filesystem"
-  o "content not available") — stesso comportamento inline gia' validato per gli
-  allegati email su HTTP.
-- Il contenuto decodificato e' leggibile (PDF/PNG/etc).
+- `get_event_attachment`:
+  - allegato **piccolo** (<=256 KB): ritorna `content_base64` valido, Claude lo legge inline.
+  - allegato **grande** (>256 KB, es. PDF biglietto): NON ritorna il base64 (bloccherebbe
+    il client). Lo carica su OneDrive in `Attachments/Events/` e ritorna
+    `staged_to_onedrive: true` + `onedrive_file_id` + `web_url`. Claude puo' poi
+    aprire il link o usare `get_file`. Questo e' il fix del blocco osservato in v0.2.9.
+- Il contenuto e' leggibile (inline o via il file OneDrive).
+
+> **Nota soglia (v0.2.10)**: la soglia inline e' 256 KB. Per forzare l'inline anche
+> su file grandi (sconsigliato via Desktop): passare `max_inline_size` piu' alto.
 
 ## Se fallisce
 - Errore auth/401 → ri-autentica il connettore (Redis dovrebbe persistere lo state,

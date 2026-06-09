@@ -167,7 +167,71 @@ def test_get_event_attachment_missing_content_raises(monkeypatch):
         "request",
         lambda *a, **k: {"name": "f", "contentType": "x", "size": 0},
     )
-    with pytest.raises(ValueError, match="content not available"):
+    with pytest.raises(ValueError, match="reference attachment"):
         tools.get_event_attachment(
             event_id="e", attachment_id="a", account_id="acc"
         )
+
+
+def test_get_event_attachment_large_stages_to_onedrive(monkeypatch):
+    # 300 KB payload, default inline cap is 256 KB -> must go to OneDrive.
+    payload = b"x" * (300 * 1024)
+    b64 = base64.b64encode(payload).decode("utf-8")
+
+    monkeypatch.setattr(
+        tools.graph,
+        "request",
+        lambda *a, **k: {
+            "name": "boarding-pass.pdf",
+            "contentType": "application/pdf",
+            "size": len(payload),
+            "contentBytes": b64,
+        },
+    )
+
+    uploaded = {}
+
+    def fake_upload(path, data, account_id=None, item_properties=None):
+        uploaded["path"] = path
+        uploaded["bytes"] = len(data)
+        return {"id": "drive-item-99", "webUrl": "https://onedrive/boarding-pass.pdf"}
+
+    monkeypatch.setattr(tools.graph, "upload_large_file", fake_upload)
+
+    out = tools.get_event_attachment(
+        event_id="evt-1", attachment_id="att-1", account_id="acc-1"
+    )
+
+    # bytes were NOT pushed inline
+    assert "content_base64" not in out
+    assert out["staged_to_onedrive"] is True
+    assert out["onedrive_file_id"] == "drive-item-99"
+    assert out["web_url"] == "https://onedrive/boarding-pass.pdf"
+    assert out["onedrive_path"] == "Attachments/Events/boarding-pass.pdf"
+    # the real bytes were uploaded, to the expected drive path
+    assert uploaded["bytes"] == len(payload)
+    assert uploaded["path"] == "/me/drive/root:/Attachments/Events/boarding-pass.pdf:"
+
+
+def test_get_event_attachment_large_inline_when_cap_raised(monkeypatch):
+    payload = b"y" * (300 * 1024)
+    b64 = base64.b64encode(payload).decode("utf-8")
+    monkeypatch.setattr(
+        tools.graph,
+        "request",
+        lambda *a, **k: {
+            "name": "big.pdf",
+            "contentType": "application/pdf",
+            "size": len(payload),
+            "contentBytes": b64,
+        },
+    )
+
+    out = tools.get_event_attachment(
+        event_id="evt-1",
+        attachment_id="att-1",
+        account_id="acc-1",
+        max_inline_size=1024 * 1024,  # raise cap -> force inline
+    )
+    assert out["content_base64"] == b64
+    assert "staged_to_onedrive" not in out

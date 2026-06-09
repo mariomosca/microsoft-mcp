@@ -1049,20 +1049,40 @@ def list_event_attachments(
     ]
 
 
+# Inline base64 in a tool result must stay small: a multi-hundred-KB blob
+# floods the LLM context and effectively hangs the client. Above this many
+# bytes (decoded), get_event_attachment stages the file to OneDrive and
+# returns a link instead of the bytes. ~256 KB keeps small tickets/QR inline.
+EVENT_ATTACHMENT_INLINE_MAX_BYTES = 256 * 1024
+
+
 @mcp.tool
 def get_event_attachment(
     event_id: str,
     attachment_id: str,
     account_id: str,
     save_path: str | None = None,
+    max_inline_size: int = EVENT_ATTACHMENT_INLINE_MAX_BYTES,
+    onedrive_folder: str = "Attachments/Events",
 ) -> dict[str, Any]:
     """Download a calendar event attachment.
 
-    Mirrors ``get_attachment`` (email): if ``save_path`` is provided the
-    attachment is written to that path on the server's filesystem (only useful
-    for local stdio). Otherwise the content is returned inline as base64 in
-    ``content_base64`` - required for remote/HTTP deployments and ready to be
-    passed back to ``create_file(content_base64=...)``.
+    Behaviour (mirrors ``get_attachment`` for email, with a size guard):
+
+    - ``save_path`` set -> write the bytes to the server filesystem (local
+      stdio only) and return ``saved_to``.
+    - small attachment (decoded size <= ``max_inline_size``) -> return the
+      bytes inline as base64 in ``content_base64`` (ready to pass to
+      ``create_file(content_base64=...)``).
+    - large attachment over HTTP (no ``save_path``) -> the bytes are NOT
+      returned inline (a big base64 blob hangs the LLM client). Instead the
+      file is uploaded to OneDrive under ``onedrive_folder`` and the response
+      carries ``onedrive_file_id`` + ``web_url`` so the file stays accessible
+      without flooding the context. Set ``max_inline_size`` higher to force
+      inline if you really need the bytes.
+
+    Only ``fileAttachment`` types carry content; ``referenceAttachment`` (link
+    attachments, e.g. a OneDrive link on the event) have no bytes and raise.
     """
     result = graph.request(
         "GET",
@@ -1074,23 +1094,47 @@ def get_event_attachment(
         raise ValueError("Attachment not found")
 
     if "contentBytes" not in result:
-        raise ValueError("Attachment content not available")
+        raise ValueError(
+            "Attachment content not available - this is likely a reference "
+            "attachment (link), which has no downloadable bytes. Open it from "
+            "the link instead."
+        )
 
+    name = result.get("name", "unknown")
     response: dict[str, Any] = {
-        "name": result.get("name", "unknown"),
+        "name": name,
         "content_type": result.get("contentType", "application/octet-stream"),
         "size": result.get("size", 0),
     }
+
+    raw = base64.b64decode(result["contentBytes"])
 
     if save_path is not None:
         # Local stdio: persist to the server filesystem.
         path = pl.Path(save_path).expanduser().resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(base64.b64decode(result["contentBytes"]))
+        path.write_bytes(raw)
         response["saved_to"] = str(path)
-    else:
-        # Remote/HTTP: return the bytes inline (already base64 from Graph).
+    elif len(raw) <= max_inline_size:
+        # Small enough: return the bytes inline (already base64 from Graph).
         response["content_base64"] = result["contentBytes"]
+    else:
+        # Too large to inline over HTTP: stage to OneDrive and return a link
+        # so we never push megabytes of base64 into the model context.
+        onedrive_path = f"{onedrive_folder.strip('/')}/{name}"
+        uploaded = graph.upload_large_file(
+            f"/me/drive/root:/{onedrive_path}:", raw, account_id
+        )
+        response["staged_to_onedrive"] = True
+        response["onedrive_path"] = onedrive_path
+        response["onedrive_file_id"] = uploaded.get("id")
+        response["web_url"] = uploaded.get("webUrl")
+        response["note"] = (
+            f"Attachment ({len(raw)} bytes) exceeded the inline limit "
+            f"({max_inline_size} bytes) and was saved to OneDrive at "
+            f"'{onedrive_path}'. Use get_file(file_id=onedrive_file_id, ...) "
+            "or open web_url to access it."
+        )
 
     return response
 
