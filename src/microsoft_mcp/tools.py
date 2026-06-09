@@ -1252,7 +1252,11 @@ def get_event_attachment(
     save_path: str | None = None,
     onedrive_folder: str = "Attachments/Events",
 ) -> dict[str, Any]:
-    """Download a calendar event attachment WITHOUT pushing bytes to the model.
+    """DOWNLOAD an event attachment to OneDrive/disk (NOT for reading contents).
+
+    Use this only to save the file or get a shareable link. To READ what's inside
+    a file (spreadsheet, PDF, etc), use read_event_attachment / read_attachment_text
+    instead - they return the text directly.
 
     The attachment content is never returned inline as base64: a base64 blob in
     a tool result floods the LLM context and hangs the client (and the model
@@ -1310,10 +1314,15 @@ def read_event_attachment(
     account_id: str,
     max_chars: int = ATTACHMENT_TEXT_MAX_CHARS,
 ) -> dict[str, Any]:
-    """Read a calendar event attachment as TEXT (server-side extraction).
+    """USE THIS to read / open / view the CONTENTS of a calendar event attachment.
 
-    Downloads the attachment and extracts plain text on the server, so the
-    model can read it without ever receiving base64. Supported:
+    This is the correct tool whenever the user asks to read, open, view, check,
+    summarize or extract data from an event attachment (spreadsheet, PDF, ticket,
+    document). It extracts the text server-side and returns it directly - do NOT
+    use get_event_attachment for reading (that one only downloads the file).
+
+    Extracts plain text on the server, so the model reads it without ever
+    receiving base64. Supported:
 
     - xlsx/xlsm -> sheets and cells as tab-separated text
     - pdf       -> extracted text per page
@@ -1416,11 +1425,16 @@ def read_attachment_text(
     onedrive_file_id: str | None = None,
     max_chars: int = ATTACHMENT_TEXT_MAX_CHARS,
 ) -> dict[str, Any]:
-    """Read ANY supported file as TEXT, from any source, server-side.
+    """USE THIS to read / open / view the CONTENTS of any attachment or file.
 
-    One generic reader for the three sources - never returns base64, always
-    extracts text on the server (see _extract_text for supported formats:
-    text/csv/xlsx/ods/pdf/docx/odt/pptx/rtf/html/eml/msg).
+    Preferred tool whenever the user wants to read, open, view, check, summarize
+    or extract data from a file - event attachment, email attachment, or a
+    OneDrive file. Returns the extracted text directly; never returns base64 and
+    never needs the user to re-upload the file. Do NOT use the get_* tools for
+    reading (those only download).
+
+    One generic reader for the three sources - extracts text on the server (see
+    _extract_text: text/csv/xlsx/ods/pdf/docx/odt/pptx/rtf/html/eml/msg).
 
     Provide exactly one source:
       - calendar event attachment:  event_id + attachment_id
