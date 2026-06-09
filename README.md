@@ -68,6 +68,8 @@ claude
 - **`respond_event`** - Accept/decline/tentative response to invitations
 - **`check_availability`** - Check free/busy times for scheduling
 - **`search_events`** - Search calendar events
+- **`list_event_attachments`** - List attachments of a calendar event (id, name, contentType, size)
+- **`get_event_attachment`** - Download an event attachment (inline base64 or save to disk)
 
 ### Contact Tools
 - **`list_contacts`** - List all contacts

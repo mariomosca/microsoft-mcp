@@ -1018,6 +1018,84 @@ def get_attachment(
 
 
 @mcp.tool
+def list_event_attachments(
+    event_id: str,
+    account_id: str,
+) -> list[dict[str, Any]]:
+    """List attachments of a calendar event.
+
+    Mirrors the email attachment pattern: returns metadata only (id, name,
+    contentType, size) for each attachment so the content can be fetched on
+    demand with ``get_event_attachment``. Useful e.g. to find a flight ticket
+    (PDF/PNG) attached to a meeting and then extract PNR / times from it.
+    """
+    items = list(
+        graph.request_paginated(
+            f"/me/events/{event_id}/attachments",
+            account_id,
+            params={"$select": "id,name,contentType,size,isInline"},
+        )
+    )
+
+    return [
+        {
+            "id": item.get("id"),
+            "name": item.get("name", "unknown"),
+            "content_type": item.get("contentType", "application/octet-stream"),
+            "size": item.get("size", 0),
+            "is_inline": item.get("isInline", False),
+        }
+        for item in items
+    ]
+
+
+@mcp.tool
+def get_event_attachment(
+    event_id: str,
+    attachment_id: str,
+    account_id: str,
+    save_path: str | None = None,
+) -> dict[str, Any]:
+    """Download a calendar event attachment.
+
+    Mirrors ``get_attachment`` (email): if ``save_path`` is provided the
+    attachment is written to that path on the server's filesystem (only useful
+    for local stdio). Otherwise the content is returned inline as base64 in
+    ``content_base64`` - required for remote/HTTP deployments and ready to be
+    passed back to ``create_file(content_base64=...)``.
+    """
+    result = graph.request(
+        "GET",
+        f"/me/events/{event_id}/attachments/{attachment_id}",
+        account_id,
+    )
+
+    if not result:
+        raise ValueError("Attachment not found")
+
+    if "contentBytes" not in result:
+        raise ValueError("Attachment content not available")
+
+    response: dict[str, Any] = {
+        "name": result.get("name", "unknown"),
+        "content_type": result.get("contentType", "application/octet-stream"),
+        "size": result.get("size", 0),
+    }
+
+    if save_path is not None:
+        # Local stdio: persist to the server filesystem.
+        path = pl.Path(save_path).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(base64.b64decode(result["contentBytes"]))
+        response["saved_to"] = str(path)
+    else:
+        # Remote/HTTP: return the bytes inline (already base64 from Graph).
+        response["content_base64"] = result["contentBytes"]
+
+    return response
+
+
+@mcp.tool
 def search_files(
     query: str,
     account_id: str,
