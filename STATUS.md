@@ -11,10 +11,10 @@ Connettori → "Brandart Microsoft 365" → URL sopra → lascia Advanced Settin
 ## Risorse Azure (rg-brandart-mcp, westeurope)
 - Container App: `brandart-mcp-gateway` (image **v0.2.14** — OAuth store su Postgres durabile, rev 0000017)
 - Container Registry: `acrbrandartmcp.azurecr.io`
-- Key Vault: `kv-brandart-mcp` (secrets: entra-client-secret, jwt-signing-key, redis-connection-string)
+- Key Vault: `kv-brandart-mcp` (secrets: entra-client-secret, jwt-signing-key)
 - App Insights: `appi-brandart-mcp`
 - **OAuth store**: PostgreSQL — DB `mcp_oauth` su `brandart-visitors-db` (Postgres 16 flexible, BrandartSvilRG), utente dedicato `mcp_oauth_user`. Tabella auto-creata `kv_store`. Connection string nel secret `oauth-store-url`, montata come env `OAUTH_STORE_URL`. Il Container App raggiunge il Postgres via regola firewall `AllowAzureServices`.
-- ~~Redis: `redis-brandart-mcp`~~ — **dismesso come store OAuth** (vedi sotto). Restava provisionato ma non collegato.
+- ~~Redis: `redis-brandart-mcp`~~ — **eliminato il 24 Jun 2026** (mai realmente collegato, sostituito da Postgres). Rimossi anche i secret orfani `redis-url` (Container App) e `redis-connection-string` (Key Vault). Il codice mantiene un fallback `elif REDIS_URL` ma non è configurato.
 - Entra App: `Brandart MCP Gateway` (client_id: 4506b2a9-cdc5-4e7c-8e43-cc0307cb9f61)
 
 ## Architettura auth state
@@ -32,13 +32,22 @@ az acr build -t microsoft-mcp:$VERSION -r acrbrandartmcp .
 az containerapp update -g rg-brandart-mcp -n brandart-mcp-gateway --image acrbrandartmcp.azurecr.io/microsoft-mcp:$VERSION
 ```
 
-## Rotation Redis primaryKey
+## Rotation password OAuth store (utente Postgres `mcp_oauth_user`)
 ```bash
-NEW_KEY=$(az redis regenerate-keys -g rg-brandart-mcp -n redis-brandart-mcp --key-type Primary --query primaryKey -o tsv)
-NEW_URL="rediss://:${NEW_KEY}@redis-brandart-mcp.redis.cache.windows.net:6380/0"
-az keyvault secret set --vault-name kv-brandart-mcp --name redis-connection-string --value "$NEW_URL"
-# Container app risincronizza automaticamente (sync ogni 30 min) o force restart:
+# Cambia la password del ruolo dedicato sul DB mcp_oauth, poi aggiorna il secret.
+# Serve una firewall-rule temp sull'IP corrente per raggiungere il PG da fuori Azure.
+MYIP=$(curl -s https://api.ipify.org)
+az postgres flexible-server firewall-rule create -g BrandartSvilRG --name brandart-visitors-db \
+  --rule-name tmp-rotate --start-ip-address "$MYIP" --end-ip-address "$MYIP"
+NEW_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+PGPASSWORD="<admin-pass>" psql "host=brandart-visitors-db.postgres.database.azure.com port=5432 user=brandartadmin dbname=mcp_oauth sslmode=require" \
+  -c "ALTER ROLE mcp_oauth_user PASSWORD '$NEW_PASS';"
+NEW_URL="postgresql://mcp_oauth_user:${NEW_PASS}@brandart-visitors-db.postgres.database.azure.com:5432/mcp_oauth?sslmode=require"
+az containerapp secret set -g rg-brandart-mcp -n brandart-mcp-gateway --secrets "oauth-store-url=$NEW_URL"
+# Il secretref si aggiorna ma serve restart per rileggerlo:
 az containerapp revision restart -g rg-brandart-mcp -n brandart-mcp-gateway --revision $(az containerapp revision list -g rg-brandart-mcp -n brandart-mcp-gateway --query "[?properties.active].name | [0]" -o tsv)
+az postgres flexible-server firewall-rule delete -g BrandartSvilRG --name brandart-visitors-db --rule-name tmp-rotate --yes
+# NB: la pass admin di brandartadmin è recuperabile da DATABASE_URL della webapp brandart-visitors (BrandartSvilRG).
 ```
 
 ## Storia versioni deploy
