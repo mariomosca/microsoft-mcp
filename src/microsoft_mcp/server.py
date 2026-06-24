@@ -23,12 +23,21 @@ def _configure_auth() -> None:
     entra_tenant_id = os.environ["ENTRA_TENANT_ID"]
     public_base_url = os.environ["PUBLIC_BASE_URL"]
 
-    # Persist OAuth client registrations and encrypted token state in Redis when
-    # REDIS_URL is set; otherwise FastMCP falls back to its ephemeral file store
-    # (lost on container restart, causing invalid_token loops).
+    # Persist OAuth client registrations and encrypted token state in a durable
+    # backing store. Without it, FastMCP falls back to its ephemeral file store,
+    # which is wiped on every container restart/redeploy/node recycle, forcing all
+    # clients to re-run the full OAuth flow (observed as invalid_token 401 loops).
+    #
+    # Preferred backend: PostgreSQL (ACID, durable on disk, survives node recycles).
+    # OAUTH_STORE_URL = postgresql://user:pass@host:5432/dbname?sslmode=require
+    # Falls back to Redis (REDIS_URL) if Postgres is not configured.
     client_storage = None
+    pg_url = os.getenv("OAUTH_STORE_URL")
     redis_url = os.getenv("REDIS_URL")
-    if redis_url:
+    if pg_url:
+        from key_value.aio.stores.postgresql import PostgreSQLStore
+        client_storage = PostgreSQLStore(url=pg_url, default_collection="mcp-oauth")
+    elif redis_url:
         from key_value.aio.stores.redis import RedisStore
         client_storage = RedisStore(url=redis_url, default_collection="mcp-oauth")
 
