@@ -1,5 +1,13 @@
 # microsoft-mcp — Stato Deploy Azure
 
+## v0.3.0 (20 Jul 2026) — flag + custom folders + count
+Fix del triage mail flag, prima non gestibile via MCP (obbligava a workaround Graph/CLI).
+- `list_emails`: aggiunto `flag` al `$select`; nuovo param `only_flagged` (`$filter=flag/flagStatus eq 'flagged'`).
+- `get_email`: aggiunto `flag` (+ `categories`) al `$select` esplicito → lo stato flag è visibile aprendo la singola mail.
+- **Folder custom**: nuovo helper `_resolve_folder_id()` che risolve per display-name anche le child folder (BFS su `childFolders`). Prima `list_emails`/`move_email` sulle custom (Prioritaria, ToMe, Follow-up) davano 400. Ora funzionano.
+- Nuovo tool `count_emails(folder, only_flagged, only_unread)` → conteggio via `$count` senza scaricare i corpi ("quante flaggate/non lette ho").
+- `graph.py`: `ConsistencyLevel: eventual` esteso ai filtri `flag/flagStatus`.
+
 ## Endpoint produzione
 ```
 https://brandart-mcp-gateway.jollyfield-bcd8d619.westeurope.azurecontainerapps.io/mcp
@@ -9,7 +17,7 @@ https://brandart-mcp-gateway.jollyfield-bcd8d619.westeurope.azurecontainerapps.i
 Connettori → "Brandart Microsoft 365" → URL sopra → lascia Advanced Settings vuote
 
 ## Risorse Azure (rg-brandart-mcp, westeurope)
-- Container App: `brandart-mcp-gateway` (image **v0.2.14** — OAuth store su Postgres durabile, rev 0000017)
+- Container App: `brandart-mcp-gateway` (image **v0.3.0** — flag read/filter + custom-folder resolution + count_emails; OAuth store su Postgres durabile)
 - Container Registry: `acrbrandartmcp.azurecr.io`
 - Key Vault: `kv-brandart-mcp` (secrets: entra-client-secret, jwt-signing-key)
 - App Insights: `appi-brandart-mcp`

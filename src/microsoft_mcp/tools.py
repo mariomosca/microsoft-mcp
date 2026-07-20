@@ -19,6 +19,67 @@ FOLDERS = {
     }.items()
 }
 
+# Well-known folders that Graph accepts as-is in the URL path. Anything else
+# (custom folders like "Prioritaria", "ToMe", "Follow-up") must be resolved to
+# a folder id first, otherwise Graph treats the display name as an id -> 400.
+_WELL_KNOWN_FOLDERS = {
+    "inbox",
+    "sentitems",
+    "drafts",
+    "deleteditems",
+    "junkemail",
+    "archive",
+    "outbox",
+    "deletionsfolder",
+    "recoverableitemsdeletions",
+    "scheduled",
+    "searchfolders",
+    "msgfolderroot",
+}
+
+
+def _resolve_folder_id(folder: str, account_id: str | None = None) -> str:
+    """Resolve a folder name to a Graph folder id.
+
+    Accepts: well-known names (inbox, sent, ...) returned as-is; a raw folder id
+    returned as-is; otherwise a display name matched case-insensitively against
+    the full folder tree (top level + nested child folders, e.g. the custom
+    "Prioritaria" / "ToMe" / "Follow-up" living under "Posta in arrivo").
+    """
+    mapped = FOLDERS.get(folder.casefold(), folder)
+    if mapped.casefold() in _WELL_KNOWN_FOLDERS:
+        return mapped
+
+    target = mapped.casefold()
+    # BFS over the folder tree following childFolders.
+    queue: list[str] = ["/me/mailFolders"]
+    while queue:
+        path = queue.pop(0)
+        result = graph.request(
+            "GET",
+            path,
+            account_id,
+            params={
+                "$top": 100,
+                "$select": "id,displayName",
+                "$expand": "childFolders($select=id,displayName)",
+            },
+        )
+        if not result or "value" not in result:
+            continue
+        for f in result["value"]:
+            if f.get("displayName", "").casefold() == target:
+                return f["id"]
+            if f.get("id") == mapped:  # caller passed an actual id
+                return mapped
+            for c in f.get("childFolders", []) or []:
+                if c.get("displayName", "").casefold() == target:
+                    return c["id"]
+                # queue deeper levels for folders that nest beyond one level
+                queue.append(f"/me/mailFolders/{c['id']}/childFolders")
+
+    raise ValueError(f"Folder '{folder}' not found")
+
 
 @mcp.tool
 def list_accounts() -> list[dict[str, str]]:
@@ -155,14 +216,21 @@ def list_emails(
     folder: str = "inbox",
     limit: int = 10,
     include_body: bool = True,
+    only_flagged: bool = False,
 ) -> list[dict[str, Any]]:
-    """List emails from specified folder"""
-    folder_path = FOLDERS.get(folder.casefold(), folder)
+    """List emails from specified folder.
+
+    Supports well-known folders (inbox, sent, drafts, ...) and custom folders
+    by display name (e.g. "Prioritaria", "ToMe", "Follow-up"). Set
+    ``only_flagged=True`` to return just the flagged (follow-up) messages;
+    each item includes the ``flag`` object so the flag status is visible.
+    """
+    folder_id = _resolve_folder_id(folder, account_id)
 
     if include_body:
-        select_fields = "id,subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,body,conversationId,isRead"
+        select_fields = "id,subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,body,conversationId,isRead,flag"
     else:
-        select_fields = "id,subject,from,toRecipients,receivedDateTime,hasAttachments,conversationId,isRead"
+        select_fields = "id,subject,from,toRecipients,receivedDateTime,hasAttachments,conversationId,isRead,flag"
 
     params = {
         "$top": min(limit, 100),
@@ -170,9 +238,12 @@ def list_emails(
         "$orderby": "receivedDateTime desc",
     }
 
+    if only_flagged:
+        params["$filter"] = "flag/flagStatus eq 'flagged'"
+
     emails = list(
         graph.request_paginated(
-            f"/me/mailFolders/{folder_path}/messages",
+            f"/me/mailFolders/{folder_id}/messages",
             account_id,
             params=params,
             limit=limit,
@@ -180,6 +251,44 @@ def list_emails(
     )
 
     return emails
+
+
+@mcp.tool
+def count_emails(
+    account_id: str,
+    folder: str = "inbox",
+    only_flagged: bool = False,
+    only_unread: bool = False,
+) -> dict[str, Any]:
+    """Count emails in a folder without downloading their bodies.
+
+    Cheap way to answer "how many flagged / unread messages do I have".
+    Supports well-known and custom folders (by display name or id). Combine
+    ``only_flagged`` and/or ``only_unread`` to narrow the count.
+    """
+    folder_id = _resolve_folder_id(folder, account_id)
+
+    filters = []
+    if only_flagged:
+        filters.append("flag/flagStatus eq 'flagged'")
+    if only_unread:
+        filters.append("isRead eq false")
+
+    params: dict[str, Any] = {"$top": 1, "$select": "id", "$count": "true"}
+    if filters:
+        params["$filter"] = " and ".join(filters)
+
+    result = graph.request(
+        "GET", f"/me/mailFolders/{folder_id}/messages", account_id, params=params
+    )
+    count = (result or {}).get("@odata.count")
+
+    return {
+        "folder": folder,
+        "count": count,
+        "only_flagged": only_flagged,
+        "only_unread": only_unread,
+    }
 
 
 @mcp.tool
@@ -199,7 +308,9 @@ def get_email(
         body_max_length: Maximum characters for body content (default: 50000)
         include_attachments: Whether to include attachment metadata (default: True)
     """
-    params = {}
+    params = {
+        "$select": "id,subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,body,conversationId,isRead,flag,categories",
+    }
     if include_attachments:
         params["$expand"] = "attachments($select=id,name,size,contentType)"
 
@@ -444,24 +555,12 @@ def delete_email(email_id: str, account_id: str) -> dict[str, str]:
 def move_email(
     email_id: str, destination_folder: str, account_id: str
 ) -> dict[str, Any]:
-    """Move email to another folder"""
-    folder_path = FOLDERS.get(destination_folder.casefold(), destination_folder)
+    """Move email to another folder.
 
-    folders = graph.request("GET", "/me/mailFolders", account_id)
-    folder_id = None
-
-    if not folders:
-        raise ValueError("Failed to retrieve mail folders")
-    if "value" not in folders:
-        raise ValueError(f"Unexpected folder response structure: {folders}")
-
-    for folder in folders["value"]:
-        if folder["displayName"].lower() == folder_path.lower():
-            folder_id = folder["id"]
-            break
-
-    if not folder_id:
-        raise ValueError(f"Folder '{destination_folder}' not found")
+    Resolves both well-known and custom folders (including nested ones such as
+    "Follow-up" under "Posta in arrivo") by display name or id.
+    """
+    folder_id = _resolve_folder_id(destination_folder, account_id)
 
     payload = {"destinationId": folder_id}
     result = graph.request(
