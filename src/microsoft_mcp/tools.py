@@ -232,7 +232,7 @@ def list_emails(
     else:
         select_fields = "id,subject,from,toRecipients,receivedDateTime,hasAttachments,conversationId,isRead,flag"
 
-    params = {
+    params: dict[str, Any] = {
         "$top": min(limit, 100),
         "$select": select_fields,
         "$orderby": "receivedDateTime desc",
@@ -240,6 +240,10 @@ def list_emails(
 
     if only_flagged:
         params["$filter"] = "flag/flagStatus eq 'flagged'"
+        # Advanced queries (ConsistencyLevel: eventual, required by the flag
+        # filter) reject $orderby on a property other than the filtered one ->
+        # 400. Drop $orderby here and sort client-side below.
+        del params["$orderby"]
 
     emails = list(
         graph.request_paginated(
@@ -249,6 +253,9 @@ def list_emails(
             limit=limit,
         )
     )
+
+    if only_flagged:
+        emails.sort(key=lambda e: e.get("receivedDateTime", ""), reverse=True)
 
     return emails
 
@@ -591,34 +598,130 @@ def reply_all_email(account_id: str, email_id: str, body: str) -> dict[str, str]
     return {"status": "sent"}
 
 
-@mcp.tool
-def create_reply_draft(
-    account_id: str, email_id: str, body: str | None = None
+def _build_reply_draft(
+    endpoint: str,
+    account_id: str,
+    body: str | None,
+    body_type: str,
+    attachments: str | list[str] | None,
+    attachments_inline: list[dict[str, str]] | None,
+    error_label: str,
 ) -> dict[str, Any]:
-    """Create a reply draft (sender only) without sending. Returns the draft message for review."""
-    endpoint = f"/me/messages/{email_id}/createReply"
-    payload = {}
+    """Shared implementation for reply / reply-all drafts.
+
+    Always DRAFT-ONLY: creates the reply via Graph createReply/createReplyAll
+    (which preserves thread headers, recipients and the quoted history), then
+    sets the new body and adds attachments on the draft. It NEVER calls /send.
+
+    ``body_type`` is "html" (default) or "text". When html, ``body`` is your new
+    text/signature only — Graph keeps the quoted original below it.
+    """
+    ct = "HTML" if body_type.casefold() == "html" else "Text"
+
+    # Step 1 — create the draft in the thread. Passing the body via the
+    # createReply "message" payload lets Graph merge our content ABOVE the
+    # quoted history (it does not overwrite the quote), so thread integrity and
+    # quoting are preserved.
+    payload: dict[str, Any] = {}
     if body:
-        payload["message"] = {"body": {"contentType": "Text", "content": body}}
+        payload["message"] = {"body": {"contentType": ct, "content": body}}
     result = graph.request("POST", endpoint, account_id, json=payload)
     if not result:
-        raise ValueError("Failed to create reply draft")
+        raise ValueError(error_label)
+
+    draft_id = result.get("id")
+
+    # Step 2 — attach files to the draft (small inline base64, large via
+    # upload session), same handling as create_email_draft/send_email.
+    resolved = _resolve_email_attachments(attachments, attachments_inline)
+    if resolved and draft_id:
+        for att_name, content_bytes in resolved:
+            if len(content_bytes) >= 3 * 1024 * 1024:
+                graph.upload_large_mail_attachment(
+                    draft_id, att_name, content_bytes, account_id
+                )
+            else:
+                graph.request(
+                    "POST",
+                    f"/me/messages/{draft_id}/attachments",
+                    account_id,
+                    json={
+                        "@odata.type": "#microsoft.graph.fileAttachment",
+                        "name": att_name,
+                        "contentBytes": base64.b64encode(content_bytes).decode(
+                            "utf-8"
+                        ),
+                    },
+                )
+        # Re-read so the returned draft reflects the added attachments.
+        refreshed = graph.request(
+            "GET",
+            f"/me/messages/{draft_id}",
+            account_id,
+            params={"$expand": "attachments($select=id,name,size,contentType)"},
+        )
+        if refreshed:
+            if "attachments" in refreshed:
+                for a in refreshed["attachments"]:
+                    a.pop("contentBytes", None)
+            return refreshed
+
     return result
+
+
+@mcp.tool
+def create_reply_draft(
+    account_id: str,
+    email_id: str,
+    body: str | None = None,
+    body_type: str = "html",
+    attachments: str | list[str] | None = None,
+    attachments_inline: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Create a reply draft (sender only) WITHOUT sending — returns the draft for review.
+
+    Draft-only: never sends. Preserves the thread (In-Reply-To/References) and
+    the quoted original. ``body`` is your new text only. ``body_type`` is
+    "html" (default) or "text". Attachments may be local paths (``attachments``,
+    stdio only) and/or inline base64 (``attachments_inline``, a list of
+    ``{"name", "content_base64"}``, for remote/HTTP).
+    """
+    return _build_reply_draft(
+        f"/me/messages/{email_id}/createReply",
+        account_id,
+        body,
+        body_type,
+        attachments,
+        attachments_inline,
+        "Failed to create reply draft",
+    )
 
 
 @mcp.tool
 def create_reply_all_draft(
-    account_id: str, email_id: str, body: str | None = None
+    account_id: str,
+    email_id: str,
+    body: str | None = None,
+    body_type: str = "html",
+    attachments: str | list[str] | None = None,
+    attachments_inline: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Create a reply-all draft without sending. Preserves the email chain and all recipients. Returns the draft message for review."""
-    endpoint = f"/me/messages/{email_id}/createReplyAll"
-    payload = {}
-    if body:
-        payload["message"] = {"body": {"contentType": "Text", "content": body}}
-    result = graph.request("POST", endpoint, account_id, json=payload)
-    if not result:
-        raise ValueError("Failed to create reply-all draft")
-    return result
+    """Create a reply-all draft WITHOUT sending — returns the draft for review.
+
+    Draft-only: never sends. Preserves the thread and ALL recipients plus the
+    quoted original. ``body`` is your new text only. ``body_type`` is "html"
+    (default) or "text". Attachments: local paths (``attachments``, stdio only)
+    and/or inline base64 (``attachments_inline``).
+    """
+    return _build_reply_draft(
+        f"/me/messages/{email_id}/createReplyAll",
+        account_id,
+        body,
+        body_type,
+        attachments,
+        attachments_inline,
+        "Failed to create reply-all draft",
+    )
 
 
 @mcp.tool
