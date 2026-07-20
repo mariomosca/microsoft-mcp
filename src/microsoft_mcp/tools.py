@@ -1,11 +1,34 @@
 import base64
 import datetime as dt
+import os
 import pathlib as pl
 from typing import Any
 from fastmcp import FastMCP
 from . import graph, auth
 
 mcp = FastMCP("microsoft-mcp")
+
+
+def _assert_send_enabled() -> None:
+    """Guard for outbound-send tools.
+
+    When MICROSOFT_MCP_DISABLE_SEND is truthy the server refuses to actually
+    send mail (send_email / reply_to_email / reply_all_email) and points to the
+    draft tools instead. This is a hard, code-level kill-switch: drafting stays
+    fully available, sending is blocked until the env var is unset — no rebuild
+    needed to toggle. respond_event (calendar RSVP) is intentionally NOT gated.
+    """
+    if os.getenv("MICROSOFT_MCP_DISABLE_SEND", "").strip().casefold() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        raise ValueError(
+            "Sending is disabled on this server (MICROSOFT_MCP_DISABLE_SEND). "
+            "Use create_reply_draft / create_reply_all_draft / create_email_draft "
+            "to prepare a draft for manual review and send."
+        )
 
 FOLDERS = {
     k.casefold(): v
@@ -434,7 +457,7 @@ def send_email(
     attachments: str | list[str] | None = None,
     attachments_inline: list[dict[str, str]] | None = None,
 ) -> dict[str, str]:
-    """Send an email immediately, optionally with attachments.
+    """Send an email immediately, optionally with attachments. SENDS — gated by MICROSOFT_MCP_DISABLE_SEND kill-switch.
 
     Attachments may be provided as local file path(s) (``attachments``, server
     filesystem only — works for local stdio) and/or inline as base64
@@ -442,6 +465,7 @@ def send_email(
     required for remote/HTTP deployments where the server cannot read the
     client's filesystem). Both may be combined.
     """
+    _assert_send_enabled()
     to_list = [to] if isinstance(to, str) else to
 
     message = {
@@ -582,7 +606,8 @@ def move_email(
 
 @mcp.tool
 def reply_to_email(account_id: str, email_id: str, body: str) -> dict[str, str]:
-    """Reply to an email (sender only)"""
+    """Reply to an email (sender only). SENDS immediately — gated by kill-switch."""
+    _assert_send_enabled()
     endpoint = f"/me/messages/{email_id}/reply"
     payload = {"message": {"body": {"contentType": "Text", "content": body}}}
     graph.request("POST", endpoint, account_id, json=payload)
@@ -591,7 +616,8 @@ def reply_to_email(account_id: str, email_id: str, body: str) -> dict[str, str]:
 
 @mcp.tool
 def reply_all_email(account_id: str, email_id: str, body: str) -> dict[str, str]:
-    """Reply to all recipients of an email"""
+    """Reply to all recipients of an email. SENDS immediately — gated by kill-switch."""
+    _assert_send_enabled()
     endpoint = f"/me/messages/{email_id}/replyAll"
     payload = {"message": {"body": {"contentType": "Text", "content": body}}}
     graph.request("POST", endpoint, account_id, json=payload)

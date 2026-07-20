@@ -1,5 +1,10 @@
 # microsoft-mcp — Stato Deploy Azure
 
+## v0.3.2 (20 Jul 2026) — kill-switch invio mail
+- Nuovo guard `_assert_send_enabled()`: se env `MICROSOFT_MCP_DISABLE_SEND` è truthy (1/true/yes/on), `send_email` / `reply_to_email` / `reply_all_email` sollevano errore e rimandano ai `*_draft`. Hard-block a livello codice, reversibile senza rebuild (basta togliere/settare la env sul Container App).
+- **Attivo in prod**: env `MICROSOFT_MCP_DISABLE_SEND=true` sul Container App → invio mail bloccato per policy Mario (workflow = solo bozze, invio manuale da Outlook).
+- `respond_event` (RSVP inviti calendar) NON gated: resta attivo. I `create_*_draft` restano pieni.
+
 ## v0.3.1 (20 Jul 2026) — reply-draft HTML+allegati + fix filtro flag
 - `list_emails` con `only_flagged=True`: rimosso `$orderby` (Graph 400 con advanced query su `flag/flagStatus`) → ordinamento client-side per `receivedDateTime desc`.
 - `create_reply_draft` / `create_reply_all_draft`: **draft-only invariato** (mai `/send`). Nuovi param `body_type` ("html" default | "text") e `attachments`/`attachments_inline`. Il body HTML non è più forzato a Text; gli allegati (piccoli inline, grandi via upload session) si aggiungono sulla bozza. Thread integrity + quoting preservati da createReply/createReplyAll.
@@ -21,7 +26,7 @@ https://brandart-mcp-gateway.jollyfield-bcd8d619.westeurope.azurecontainerapps.i
 Connettori → "Brandart Microsoft 365" → URL sopra → lascia Advanced Settings vuote
 
 ## Risorse Azure (rg-brandart-mcp, westeurope)
-- Container App: `brandart-mcp-gateway` (image **v0.3.1** — reply-draft HTML+allegati + fix filtro flag; OAuth store su Postgres durabile)
+- Container App: `brandart-mcp-gateway` (image **v0.3.2** — kill-switch invio mail (MICROSOFT_MCP_DISABLE_SEND=true attivo); OAuth store su Postgres durabile)
 - Container Registry: `acrbrandartmcp.azurecr.io`
 - Key Vault: `kv-brandart-mcp` (secrets: entra-client-secret, jwt-signing-key)
 - App Insights: `appi-brandart-mcp`
