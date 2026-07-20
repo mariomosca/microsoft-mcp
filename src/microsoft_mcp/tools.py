@@ -633,32 +633,39 @@ def _build_reply_draft(
     attachments_inline: list[dict[str, str]] | None,
     error_label: str,
     to_recipients: str | list[str] | None = None,
+    cc_recipients: str | list[str] | None = None,
 ) -> dict[str, Any]:
     """Shared implementation for reply / reply-all / forward drafts.
 
     Always DRAFT-ONLY: creates the draft via Graph createReply/createReplyAll/
     createForward (which preserves thread headers and the quoted history — and,
-    for forward, carries the ORIGINAL ATTACHMENTS automatically), then sets the
-    new body and adds any extra attachments on the draft. It NEVER calls /send.
+    for forward, carries the ORIGINAL ATTACHMENTS automatically), then merges the
+    new body ABOVE the quoted history and adds any extra attachments. Never sends.
 
-    ``body_type`` is "html" (default) or "text". When html, ``body`` is your new
-    text/signature only — Graph keeps the quoted original below it.
-    ``to_recipients`` is used only by forward (createForward requires the new
-    recipient(s)); reply/reply-all leave it None.
+    Body merge (fixes the "quoted history disappears / body downgraded to text"
+    bug): we do NOT pass ``message.body`` to createReply/Forward — doing so makes
+    Graph replace the whole body and drop the quote. Instead we let Graph build
+    the draft (with quote + html), then read that html back and PATCH our new
+    content injected right after ``<body>`` so the quoted original stays below.
+
+    ``body_type`` is "html" (default) or "text". ``to_recipients`` /
+    ``cc_recipients`` are used mainly by forward (createForward needs the new
+    recipients); reply/reply-all can pass cc to add recipients.
     """
     ct = "HTML" if body_type.casefold() == "html" else "Text"
 
-    # Step 1 — create the draft. Passing the body via the createReply/Forward
-    # "message" payload lets Graph merge our content ABOVE the quoted history
-    # (it does not overwrite the quote), so thread integrity and quoting are
-    # preserved. For forward, the original attachments are copied automatically.
+    # Step 1 — create the draft WITHOUT a body. Graph seeds it with the quoted
+    # original (and, for forward, the original attachments) and contentType html.
     message: dict[str, Any] = {}
-    if body:
-        message["body"] = {"contentType": ct, "content": body}
     if to_recipients is not None:
         rcpts = [to_recipients] if isinstance(to_recipients, str) else to_recipients
         message["toRecipients"] = [
-            {"emailAddress": {"address": addr}} for addr in rcpts
+            {"emailAddress": {"address": a}} for a in rcpts
+        ]
+    if cc_recipients is not None:
+        ccs = [cc_recipients] if isinstance(cc_recipients, str) else cc_recipients
+        message["ccRecipients"] = [
+            {"emailAddress": {"address": a}} for a in ccs
         ]
     payload: dict[str, Any] = {"message": message} if message else {}
     result = graph.request("POST", endpoint, account_id, json=payload)
@@ -666,6 +673,27 @@ def _build_reply_draft(
         raise ValueError(error_label)
 
     draft_id = result.get("id")
+
+    # Step 1b — merge our new body above the quoted history via PATCH.
+    if body and draft_id:
+        seeded = (result.get("body") or {}).get("content", "")
+        if ct == "HTML":
+            new_html = body if "<" in body else f"<div>{body}</div>"
+            if "<body" in seeded.lower():
+                idx = seeded.lower().find("<body")
+                gt = seeded.find(">", idx)
+                merged = seeded[: gt + 1] + new_html + seeded[gt + 1 :]
+            else:
+                merged = new_html + seeded
+            new_body = {"contentType": "HTML", "content": merged}
+        else:
+            new_body = {"contentType": "Text", "content": body + "\n\n" + seeded}
+        patched = graph.request(
+            "PATCH", f"/me/messages/{draft_id}", account_id, json={"body": new_body}
+        )
+        if patched:
+            result = patched
+            draft_id = result.get("id", draft_id)
 
     # Step 2 — attach files to the draft (small inline base64, large via
     # upload session), same handling as create_email_draft/send_email.
@@ -713,14 +741,15 @@ def create_reply_draft(
     body_type: str = "html",
     attachments: str | list[str] | None = None,
     attachments_inline: list[dict[str, str]] | None = None,
+    cc: str | list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a reply draft (sender only) WITHOUT sending — returns the draft for review.
 
     Draft-only: never sends. Preserves the thread (In-Reply-To/References) and
-    the quoted original. ``body`` is your new text only. ``body_type`` is
-    "html" (default) or "text". Attachments may be local paths (``attachments``,
-    stdio only) and/or inline base64 (``attachments_inline``, a list of
-    ``{"name", "content_base64"}``, for remote/HTTP).
+    the quoted original (kept below your new text). ``body`` is your new text
+    only. ``body_type`` is "html" (default) or "text". ``cc`` adds recipients in
+    copy. Attachments may be local paths (``attachments``, stdio only) and/or
+    inline base64 (``attachments_inline``, a list of ``{"name","content_base64"}``).
     """
     return _build_reply_draft(
         f"/me/messages/{email_id}/createReply",
@@ -730,6 +759,7 @@ def create_reply_draft(
         attachments,
         attachments_inline,
         "Failed to create reply draft",
+        cc_recipients=cc,
     )
 
 
@@ -741,13 +771,15 @@ def create_reply_all_draft(
     body_type: str = "html",
     attachments: str | list[str] | None = None,
     attachments_inline: list[dict[str, str]] | None = None,
+    cc: str | list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a reply-all draft WITHOUT sending — returns the draft for review.
 
     Draft-only: never sends. Preserves the thread and ALL recipients plus the
-    quoted original. ``body`` is your new text only. ``body_type`` is "html"
-    (default) or "text". Attachments: local paths (``attachments``, stdio only)
-    and/or inline base64 (``attachments_inline``).
+    quoted original (kept below your new text). ``body`` is your new text only.
+    ``body_type`` is "html" (default) or "text". ``cc`` adds further recipients.
+    Attachments: local paths (``attachments``, stdio only) and/or inline base64
+    (``attachments_inline``).
     """
     return _build_reply_draft(
         f"/me/messages/{email_id}/createReplyAll",
@@ -757,6 +789,7 @@ def create_reply_all_draft(
         attachments,
         attachments_inline,
         "Failed to create reply-all draft",
+        cc_recipients=cc,
     )
 
 
@@ -767,17 +800,18 @@ def create_forward_draft(
     to: str | list[str],
     body: str | None = None,
     body_type: str = "html",
+    cc: str | list[str] | None = None,
     attachments: str | list[str] | None = None,
     attachments_inline: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Create a FORWARD draft WITHOUT sending — returns the draft for review.
 
-    Draft-only: never sends. Forwards ``email_id`` to ``to`` and — key point —
-    Graph copies the ORIGINAL ATTACHMENTS of the forwarded message onto the
-    draft automatically (no need to re-upload them). ``body`` is your new intro
-    text only; the quoted original is kept below. ``body_type`` is "html"
-    (default) or "text". Extra ``attachments`` / ``attachments_inline`` may be
-    added on top of the carried-over ones.
+    Draft-only: never sends. Forwards ``email_id`` to ``to`` (``cc`` in copy) and
+    — key point — Graph copies the ORIGINAL ATTACHMENTS of the forwarded message
+    onto the draft automatically (no re-upload). ``body`` is your new intro text
+    only; the quoted original is kept BELOW it (merged, html preserved).
+    ``body_type`` is "html" (default) or "text". Extra ``attachments`` /
+    ``attachments_inline`` may be added on top of the carried-over ones.
     """
     return _build_reply_draft(
         f"/me/messages/{email_id}/createForward",
@@ -788,6 +822,7 @@ def create_forward_draft(
         attachments_inline,
         "Failed to create forward draft",
         to_recipients=to,
+        cc_recipients=cc,
     )
 
 

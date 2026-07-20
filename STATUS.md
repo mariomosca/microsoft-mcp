@@ -1,5 +1,9 @@
 # microsoft-mcp — Stato Deploy Azure
 
+## v0.3.4 (20 Jul 2026) — fix body merge (quote persa) + cc su reply/forward
+- **Bugfix critico**: passando `message.body` a createReply/createForward, Graph SOSTITUIVA il body → quoted history persa e contentType degradato a text (visto su forward fatture Deloitte). Fix: la bozza si crea SENZA body (Graph mette quote+allegati+html), poi PATCH che inietta il nuovo testo subito dopo `<body>` preservando la history sotto. Vale per reply, reply-all, forward.
+- Nuovo param `cc` su `create_reply_draft` / `create_reply_all_draft` / `create_forward_draft` (helper `_build_reply_draft` esteso con `cc_recipients`). Risolve il caso "Guido in copia" sul forward.
+
 ## v0.3.3 (20 Jul 2026) — create_forward_draft
 - Nuovo tool `create_forward_draft(email_id, to, body?, body_type?, attachments?)`: crea una bozza di **inoltro** (draft-only, mai send) via Graph `createForward`. Gli **allegati originali** del messaggio inoltrato sono copiati automaticamente sulla bozza (nessun re-upload). Body HTML/text + eventuali allegati extra.
 - Helper `_build_reply_draft` esteso con `to_recipients` (usato solo dal forward). Reply/reply-all invariati.
@@ -30,7 +34,7 @@ https://brandart-mcp-gateway.jollyfield-bcd8d619.westeurope.azurecontainerapps.i
 Connettori → "Brandart Microsoft 365" → URL sopra → lascia Advanced Settings vuote
 
 ## Risorse Azure (rg-brandart-mcp, westeurope)
-- Container App: `brandart-mcp-gateway` (image **v0.3.3** — create_forward_draft; kill-switch invio mail (MICROSOFT_MCP_DISABLE_SEND=true attivo); OAuth store su Postgres durabile)
+- Container App: `brandart-mcp-gateway` (image **v0.3.4** — fix body merge quote + cc su reply/forward; kill-switch invio mail (MICROSOFT_MCP_DISABLE_SEND=true attivo); OAuth store su Postgres durabile)
 - Container Registry: `acrbrandartmcp.azurecr.io`
 - Key Vault: `kv-brandart-mcp` (secrets: entra-client-secret, jwt-signing-key)
 - App Insights: `appi-brandart-mcp`
