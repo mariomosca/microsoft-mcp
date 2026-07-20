@@ -1,5 +1,9 @@
 # microsoft-mcp — Stato Deploy Azure
 
+## v0.3.3 (20 Jul 2026) — create_forward_draft
+- Nuovo tool `create_forward_draft(email_id, to, body?, body_type?, attachments?)`: crea una bozza di **inoltro** (draft-only, mai send) via Graph `createForward`. Gli **allegati originali** del messaggio inoltrato sono copiati automaticamente sulla bozza (nessun re-upload). Body HTML/text + eventuali allegati extra.
+- Helper `_build_reply_draft` esteso con `to_recipients` (usato solo dal forward). Reply/reply-all invariati.
+
 ## v0.3.2 (20 Jul 2026) — kill-switch invio mail
 - Nuovo guard `_assert_send_enabled()`: se env `MICROSOFT_MCP_DISABLE_SEND` è truthy (1/true/yes/on), `send_email` / `reply_to_email` / `reply_all_email` sollevano errore e rimandano ai `*_draft`. Hard-block a livello codice, reversibile senza rebuild (basta togliere/settare la env sul Container App).
 - **Attivo in prod**: env `MICROSOFT_MCP_DISABLE_SEND=true` sul Container App → invio mail bloccato per policy Mario (workflow = solo bozze, invio manuale da Outlook).
@@ -26,7 +30,7 @@ https://brandart-mcp-gateway.jollyfield-bcd8d619.westeurope.azurecontainerapps.i
 Connettori → "Brandart Microsoft 365" → URL sopra → lascia Advanced Settings vuote
 
 ## Risorse Azure (rg-brandart-mcp, westeurope)
-- Container App: `brandart-mcp-gateway` (image **v0.3.2** — kill-switch invio mail (MICROSOFT_MCP_DISABLE_SEND=true attivo); OAuth store su Postgres durabile)
+- Container App: `brandart-mcp-gateway` (image **v0.3.3** — create_forward_draft; kill-switch invio mail (MICROSOFT_MCP_DISABLE_SEND=true attivo); OAuth store su Postgres durabile)
 - Container Registry: `acrbrandartmcp.azurecr.io`
 - Key Vault: `kv-brandart-mcp` (secrets: entra-client-secret, jwt-signing-key)
 - App Insights: `appi-brandart-mcp`

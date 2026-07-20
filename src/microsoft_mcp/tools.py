@@ -632,25 +632,35 @@ def _build_reply_draft(
     attachments: str | list[str] | None,
     attachments_inline: list[dict[str, str]] | None,
     error_label: str,
+    to_recipients: str | list[str] | None = None,
 ) -> dict[str, Any]:
-    """Shared implementation for reply / reply-all drafts.
+    """Shared implementation for reply / reply-all / forward drafts.
 
-    Always DRAFT-ONLY: creates the reply via Graph createReply/createReplyAll
-    (which preserves thread headers, recipients and the quoted history), then
-    sets the new body and adds attachments on the draft. It NEVER calls /send.
+    Always DRAFT-ONLY: creates the draft via Graph createReply/createReplyAll/
+    createForward (which preserves thread headers and the quoted history — and,
+    for forward, carries the ORIGINAL ATTACHMENTS automatically), then sets the
+    new body and adds any extra attachments on the draft. It NEVER calls /send.
 
     ``body_type`` is "html" (default) or "text". When html, ``body`` is your new
     text/signature only — Graph keeps the quoted original below it.
+    ``to_recipients`` is used only by forward (createForward requires the new
+    recipient(s)); reply/reply-all leave it None.
     """
     ct = "HTML" if body_type.casefold() == "html" else "Text"
 
-    # Step 1 — create the draft in the thread. Passing the body via the
-    # createReply "message" payload lets Graph merge our content ABOVE the
-    # quoted history (it does not overwrite the quote), so thread integrity and
-    # quoting are preserved.
-    payload: dict[str, Any] = {}
+    # Step 1 — create the draft. Passing the body via the createReply/Forward
+    # "message" payload lets Graph merge our content ABOVE the quoted history
+    # (it does not overwrite the quote), so thread integrity and quoting are
+    # preserved. For forward, the original attachments are copied automatically.
+    message: dict[str, Any] = {}
     if body:
-        payload["message"] = {"body": {"contentType": ct, "content": body}}
+        message["body"] = {"contentType": ct, "content": body}
+    if to_recipients is not None:
+        rcpts = [to_recipients] if isinstance(to_recipients, str) else to_recipients
+        message["toRecipients"] = [
+            {"emailAddress": {"address": addr}} for addr in rcpts
+        ]
+    payload: dict[str, Any] = {"message": message} if message else {}
     result = graph.request("POST", endpoint, account_id, json=payload)
     if not result:
         raise ValueError(error_label)
@@ -747,6 +757,37 @@ def create_reply_all_draft(
         attachments,
         attachments_inline,
         "Failed to create reply-all draft",
+    )
+
+
+@mcp.tool
+def create_forward_draft(
+    account_id: str,
+    email_id: str,
+    to: str | list[str],
+    body: str | None = None,
+    body_type: str = "html",
+    attachments: str | list[str] | None = None,
+    attachments_inline: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Create a FORWARD draft WITHOUT sending — returns the draft for review.
+
+    Draft-only: never sends. Forwards ``email_id`` to ``to`` and — key point —
+    Graph copies the ORIGINAL ATTACHMENTS of the forwarded message onto the
+    draft automatically (no need to re-upload them). ``body`` is your new intro
+    text only; the quoted original is kept below. ``body_type`` is "html"
+    (default) or "text". Extra ``attachments`` / ``attachments_inline`` may be
+    added on top of the carried-over ones.
+    """
+    return _build_reply_draft(
+        f"/me/messages/{email_id}/createForward",
+        account_id,
+        body,
+        body_type,
+        attachments,
+        attachments_inline,
+        "Failed to create forward draft",
+        to_recipients=to,
     )
 
 
