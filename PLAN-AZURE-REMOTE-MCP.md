@@ -1,9 +1,9 @@
-# PLAN — Azure Remote MCP Gateway per BrandArt
+# PLAN — Azure Remote MCP Gateway per Brandart
 
 **Progetto**: `microsoft-mcp` (fork `github.com/mariomosca/microsoft-mcp`)
-**Obiettivo**: migrare da stdio locale a **Remote MCP server** deployato su Azure Container Apps con OAuth 2.1 + Entra ID, accessibile da Claude Desktop come Custom Connector per tutto il management BrandArt.
+**Obiettivo**: migrare da stdio locale a **Remote MCP server** deployato su Azure Container Apps con OAuth 2.1 + Entra ID, accessibile da Claude Desktop come Custom Connector per tutto il management Brandart.
 **Data creazione**: 2026-04-13
-**Target delivery**: entro 2026-04-22 (recap progetti AI BrandArt)
+**Target delivery**: entro 2026-04-22 (recap progetti AI Brandart)
 **Owner**: Mario (CTO), esecuzione Alita/Kai
 
 ---
@@ -26,7 +26,7 @@ Un server **remoto con transport HTTP + OAuth 2.1** elimina tutti e 6 questi pro
 ## 2. Obiettivo e criteri di successo
 
 ### Obiettivo
-Deployare `microsoft-mcp` come servizio HTTP OAuth-native su Azure, raggiungibile da qualunque Claude Desktop (Mac/Windows) tramite "Aggiungi connettore personalizzato" con URL unico e login SSO BrandArt.
+Deployare `microsoft-mcp` come servizio HTTP OAuth-native su Azure, raggiungibile da qualunque Claude Desktop (Mac/Windows) tramite "Aggiungi connettore personalizzato" con URL unico e login SSO Brandart.
 
 ### Success criteria (deliverable 22 Apr)
 - [ ] Endpoint pubblico HTTPS `https://brandart-mcp.azurecontainerapps.io/mcp` (o custom domain)
@@ -50,16 +50,16 @@ Deployare `microsoft-mcp` come servizio HTTP OAuth-native su Azure, raggiungibil
 ```
 ┌────────────────────────┐      HTTPS + OAuth 2.1 PKCE       ┌──────────────────────────────────────┐
 │    Claude Desktop      │ ──────────────────────────────────>│  Azure Container Apps                │
-│   (N utenti BrandArt)  │                                    │  app: "brandart-mcp-gateway"          │
+│   (N utenti Brandart)  │                                    │  app: "brandart-mcp-gateway"          │
 │                        │ <─── JSON-RPC (streamable HTTP) ───│                                       │
 └────────────┬───────────┘                                    │   ┌─────────────────────────────────┐ │
              │ redirect al login                              │   │  microsoft-mcp (Python 3.12)    │ │
              ▼                                                │   │  + fastmcp streamable-http      │ │
 ┌────────────────────────┐     id_token JWT                   │   │  + authlib OAuth 2.1 proxy      │ │
 │  Entra ID tenant       │ ──────────────────────────────────>│   │  + async Blob cache backend     │ │
-│  BrandArt              │                                    │   └──────────────┬──────────────────┘ │
+│  Brandart              │                                    │   └──────────────┬──────────────────┘ │
 │  (App Registration     │ <── device code NOT USED ──────────│                  │                    │
-│   "BrandArt MCP        │     (solo OAuth web flow)          │                  │ Graph API calls   │
+│   "Brandart MCP        │     (solo OAuth web flow)          │                  │ Graph API calls   │
 │    Gateway")           │                                    └──────────────────┼────────────────────┘
 └────────────────────────┘                                                       ▼
                                                               ┌──────────────────────────────────────┐
@@ -80,7 +80,7 @@ Deployare `microsoft-mcp` come servizio HTTP OAuth-native su Azure, raggiungibil
 3. Claude Desktop chiama `GET /.well-known/oauth-authorization-server` → metadata
 4. Claude Desktop avvia OAuth 2.1 PKCE flow → redirect a `/oauth/authorize`
 5. Nostro server redirige a Entra ID `/oauth2/v2.0/authorize?client_id=<BRANDART_MCP>&...`
-6. Utente fa login su Entra ID (SSO se già loggato in BrandArt)
+6. Utente fa login su Entra ID (SSO se già loggato in Brandart)
 7. Entra ID redirige a `/oauth/callback?code=<entra_code>`
 8. Nostro server scambia `entra_code` → id_token + access_token Graph
 9. Persiste tupla `(user_id, graph_refresh_token)` in Blob Storage
@@ -375,7 +375,7 @@ Decisione finale dopo il primo try: iniziare con 7.3 (middleware ContextVar), fa
 ### 7.4 Entra ID App Registration (setup su portal.azure.com)
 
 ```
-Nome:         BrandArt MCP Gateway
+Nome:         Brandart MCP Gateway
 Tipo:         Web
 Redirect URI: https://brandart-mcp-gateway.<fqdn>.azurecontainerapps.io/auth/callback
                (+ http://localhost:8000/auth/callback per dev)
@@ -529,14 +529,14 @@ GitHub Actions workflow `.github/workflows/deploy.yml` che al push su master:
 ### 9.1 Onboarding primo utente (Mario)
 
 1. Apri Claude Desktop → Impostazioni → Connettori → **Aggiungi connettore personalizzato**
-2. Nome: `BrandArt Microsoft 365`
+2. Nome: `Brandart Microsoft 365`
 3. URL: `https://brandart-mcp-gateway.<FQDN>.azurecontainerapps.io/mcp`
 4. Click "**Advanced settings**" → inserisci:
    - OAuth Client ID: `<ENTRA_CLIENT_ID>` (stesso della App Registration)
    - OAuth Client Secret: `<ENTRA_CLIENT_SECRET>` (raro che serva lato client per PKCE public flow, ma Claude Desktop lo richiede per alcuni setup)
    - **Nota**: da luglio 2025 Claude Desktop accetta client_id/secret manuali → evitiamo di implementare Dynamic Client Registration (RFC 7591) lato server
 5. Click "Collega"
-6. Browser: redirect Entra ID → login SSO BrandArt → consent (1-click grazie ad admin consent pre-fatto) → callback
+6. Browser: redirect Entra ID → login SSO Brandart → consent (1-click grazie ad admin consent pre-fatto) → callback
 7. Claude Desktop dice "Connesso"
 
 ### 9.2 Smoke test prompts
@@ -569,7 +569,7 @@ Nuova sezione "Remote Deployment" che spiega:
 
 ### 10.2 Aggiungere `DEPLOY.md` (separato dal README)
 
-Documentazione per futuro sviluppatore/admin BrandArt:
+Documentazione per futuro sviluppatore/admin Brandart:
 - Comandi az cli per redeploy
 - Come rollback (`az containerapp revision list` + `az containerapp revision activate`)
 - Come fare debug live (log streaming)
@@ -603,7 +603,7 @@ docs(deploy): add Azure Container Apps deployment guide
 Oggi usiamo `61682051-ad6b-4d39-b4db-63f94da354ed` (App 2, device code, creata da Rocco).
 Per Remote MCP serve **Web App** (non public client), redirect URI HTTPS fissa, client secret.
 
-**Decisione**: creare **nuova** App Registration "BrandArt MCP Gateway" (Web). Mantenere la App 2 per backward compat con stdio flow.
+**Decisione**: creare **nuova** App Registration "Brandart MCP Gateway" (Web). Mantenere la App 2 per backward compat con stdio flow.
 
 ### 11.2 Domain: default Azure o custom?
 

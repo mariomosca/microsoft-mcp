@@ -1152,7 +1152,7 @@ def list_files(
 @mcp.tool
 def get_file(file_id: str, account_id: str, download_path: str) -> dict[str, Any]:
     """Download a file from OneDrive to local path"""
-    import subprocess
+    import httpx
 
     metadata = graph.request("GET", f"/me/drive/items/{file_id}", account_id)
     if not metadata:
@@ -1162,21 +1162,31 @@ def get_file(file_id: str, account_id: str, download_path: str) -> dict[str, Any
     if not download_url:
         raise ValueError("No download URL available for this file")
 
+    # Stream to disk in chunks: no subprocess/curl dependency, no full file in
+    # memory (the pre-auth downloadUrl needs no Authorization header).
+    path = pl.Path(download_path).expanduser()
     try:
-        subprocess.run(
-            ["curl", "-L", "-o", download_path, download_url],
-            check=True,
-            capture_output=True,
-        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with httpx.stream(
+            "GET", download_url, follow_redirects=True, timeout=120.0
+        ) as response:
+            response.raise_for_status()
+            with open(path, "wb") as fh:
+                for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                    fh.write(chunk)
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(
+            f"Failed to download file: HTTP {e.response.status_code} from download URL"
+        ) from e
+    except (httpx.HTTPError, OSError) as e:
+        raise RuntimeError(f"Failed to download file: {e}") from e
 
-        return {
-            "path": download_path,
-            "name": metadata.get("name", "unknown"),
-            "size_mb": round(metadata.get("size", 0) / (1024 * 1024), 2),
-            "mime_type": metadata.get("file", {}).get("mimeType") if metadata else None,
-        }
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to download file: {e.stderr.decode()}")
+    return {
+        "path": str(path),
+        "name": metadata.get("name", "unknown"),
+        "size_mb": round(metadata.get("size", 0) / (1024 * 1024), 2),
+        "mime_type": metadata.get("file", {}).get("mimeType") if metadata else None,
+    }
 
 
 def _resolve_file_bytes(
@@ -1353,13 +1363,44 @@ def list_event_attachments(
     ]
 
 
+def _reject_oversized_attachment(name: str, size: int, max_bytes: int) -> None:
+    """Refuse to pull attachments too large to parse in memory.
+
+    The gateway runs in a memory-limited container: contentBytes arrives as a
+    base64 JSON field, so a large file costs ~2.3x its size in RAM before
+    parsing even starts (observed OOM kills, exit 137, 18 Aug 2026).
+    """
+    raise ValueError(
+        f"Attachment '{name}' is {size / (1024 * 1024):.1f} MB, above the "
+        f"{max_bytes // (1024 * 1024)} MB text-extraction limit. Download it "
+        "instead (get_attachment / get_event_attachment / get_file) and open "
+        "it from OneDrive."
+    )
+
+
 def _fetch_event_attachment_bytes(
-    event_id: str, attachment_id: str, account_id: str
+    event_id: str,
+    attachment_id: str,
+    account_id: str,
+    max_bytes: int | None = None,
 ) -> tuple[str, str, bytes]:
     """Fetch a single event fileAttachment. Returns (name, content_type, raw bytes).
 
-    Raises ValueError for missing or reference (link) attachments.
+    Raises ValueError for missing or reference (link) attachments, or when the
+    attachment exceeds ``max_bytes`` (checked via metadata before pulling content).
     """
+    if max_bytes is not None:
+        meta = graph.request(
+            "GET",
+            f"/me/events/{event_id}/attachments/{attachment_id}",
+            account_id,
+            params={"$select": "name,size"},
+        )
+        if meta and meta.get("size", 0) > max_bytes:
+            _reject_oversized_attachment(
+                meta.get("name", "unknown"), meta["size"], max_bytes
+            )
+
     result = graph.request(
         "GET",
         f"/me/events/{event_id}/attachments/{attachment_id}",
@@ -1382,6 +1423,10 @@ def _fetch_event_attachment_bytes(
 
 # How much extracted text to return at most, to avoid flooding the context.
 ATTACHMENT_TEXT_MAX_CHARS = 50_000
+
+# Largest attachment the read_* tools will pull into memory for text
+# extraction. Larger files must go through the download tools instead.
+ATTACHMENT_PARSE_MAX_BYTES = 25 * 1024 * 1024
 
 
 def _extract_text(name: str, content_type: str, raw: bytes) -> tuple[str, str]:
@@ -1639,7 +1684,7 @@ def read_event_attachment(
     Output text is truncated to ``max_chars`` to protect the context.
     """
     name, content_type, raw = _fetch_event_attachment_bytes(
-        event_id, attachment_id, account_id
+        event_id, attachment_id, account_id, max_bytes=ATTACHMENT_PARSE_MAX_BYTES
     )
     kind, text = _extract_text(name, content_type, raw)
 
@@ -1713,6 +1758,10 @@ def _download_onedrive_bytes(
     download_url = metadata.get("@microsoft.graph.downloadUrl")
     if not download_url:
         raise ValueError("No download URL available for this file")
+    if metadata.get("size", 0) > ATTACHMENT_PARSE_MAX_BYTES:
+        _reject_oversized_attachment(
+            metadata.get("name", "unknown"), metadata["size"], ATTACHMENT_PARSE_MAX_BYTES
+        )
     resp = httpx.get(download_url, follow_redirects=True, timeout=60.0)
     resp.raise_for_status()
     name = metadata.get("name", "unknown")
@@ -1751,10 +1800,20 @@ def read_attachment_text(
     """
     if event_id and attachment_id:
         name, content_type, raw = _fetch_event_attachment_bytes(
-            event_id, attachment_id, account_id
+            event_id, attachment_id, account_id, max_bytes=ATTACHMENT_PARSE_MAX_BYTES
         )
         hint = "Use get_event_attachment to save it to OneDrive."
     elif email_id and attachment_id:
+        meta = graph.request(
+            "GET",
+            f"/me/messages/{email_id}/attachments/{attachment_id}",
+            account_id,
+            params={"$select": "name,size"},
+        )
+        if meta and meta.get("size", 0) > ATTACHMENT_PARSE_MAX_BYTES:
+            _reject_oversized_attachment(
+                meta.get("name", "unknown"), meta["size"], ATTACHMENT_PARSE_MAX_BYTES
+            )
         result = graph.request(
             "GET", f"/me/messages/{email_id}/attachments/{attachment_id}", account_id
         )

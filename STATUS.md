@@ -1,5 +1,13 @@
 # microsoft-mcp — Stato Deploy Azure
 
+## v0.3.5 (26 Aug 2026) — grace period rotation refresh token + fix OOM/download (brief Leo 26/08)
+Risposta all'incidente "connettori scollegati" del 25-26/08 (Mario + Massimo):
+- **Rotation grace period** (`oauth_grace.py`, `GraceAzureProvider`): il vecchio refresh token resta utilizzabile per una finestra di grazia (default 60s, env `OAUTH_ROTATION_GRACE_SECONDS`, 0 = strict) dopo ogni rotation. Un client che non riceve/salva il token ruotato (risposta persa, kill del container mid-flight, doppia sessione sullo stesso connettore) può riprovare col vecchio token e ottiene una coppia fresca invece di `invalid_grant` → niente più "connettore collegato ma non autorizzato". Il retry graced NON estende la catena (one-shot). Nessun token extra in chiaro nello store: si ri-armano le stesse entry hash-keyed di FastMCP + un marker di rotation (TTL 24h) usato solo per logging.
+- **Log espliciti reuse-detected** (richiesta Leo): `Refresh token reuse detected within grace window ...` (retry onorato), `Refresh token reuse detected: token was rotated Ns ago ...` (rifiutato, fuori grace), `... JTI mapping already consumed` (rifiutato in exchange). Logger `fastmcp.microsoft_mcp.oauth_grace` → ContainerAppConsoleLogs_CL.
+- **Mitigazione OOM** (exit 137 x3 il 18/08, limite 1Gi): cap 25 MB (`ATTACHMENT_PARSE_MAX_BYTES`) sull'estrazione testo allegati (`read_attachment_text`, `read_event_attachment`, lettura OneDrive) con pre-check `$select=size` prima di scaricare i contentBytes (un file grande costa ~2.3x la sua size in RAM: base64 JSON + bytes). I tool di download restano senza cap (streaming). **Infra**: Container App portato da 0.5 vCPU / 1Gi a 1.0 vCPU / 2Gi.
+- **Fix `get_file`** (raffica `RuntimeError: Failed to download file` del 25/08 17:38 UTC): rimosso `subprocess curl` → streaming httpx a chunk da 1 MB con errori HTTP leggibili nei log. Rimossa la dipendenza da curl nel runtime.
+- Test: `tests/test_oauth_grace.py` (8 test: grace armato, reuse onorato entro finestra, catena non estesa, grace=0 strict).
+
 ## v0.3.4 (20 Jul 2026) — fix body merge (quote persa) + cc su reply/forward
 - **Bugfix critico**: passando `message.body` a createReply/createForward, Graph SOSTITUIVA il body → quoted history persa e contentType degradato a text (visto su forward fatture Deloitte). Fix: la bozza si crea SENZA body (Graph mette quote+allegati+html), poi PATCH che inietta il nuovo testo subito dopo `<body>` preservando la history sotto. Vale per reply, reply-all, forward.
 - Nuovo param `cc` su `create_reply_draft` / `create_reply_all_draft` / `create_forward_draft` (helper `_build_reply_draft` esteso con `cc_recipients`). Risolve il caso "Guido in copia" sul forward.

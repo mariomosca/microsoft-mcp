@@ -185,7 +185,7 @@ az redis delete -g $RG -n redis-brandart-mcp --yes
 ## Future work (post v0.2.5)
 
 - [ ] Private endpoint Redis (sicurezza)
-- [ ] Redis tier Standard (HA SLA) quando >5 utenti BrandArt attivi
+- [ ] Redis tier Standard (HA SLA) quando >5 utenti Brandart attivi
 - [ ] Custom domain `mcp.brandart.it`
 - [ ] CI/CD GitHub Actions (build+deploy automatico)
 - [ ] Monitoring: alert su 401 spike (App Insights query)

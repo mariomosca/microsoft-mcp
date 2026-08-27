@@ -16,7 +16,7 @@ def main() -> None:
 
 def _configure_auth() -> None:
     """Configure AzureProvider auth on the shared mcp instance for HTTP mode."""
-    from fastmcp.server.auth.providers.azure import AzureProvider
+    from .oauth_grace import DEFAULT_ROTATION_GRACE_SECONDS, GraceAzureProvider
 
     entra_client_id = os.environ["ENTRA_CLIENT_ID"]
     entra_client_secret = os.environ["ENTRA_CLIENT_SECRET"]
@@ -41,7 +41,15 @@ def _configure_auth() -> None:
         from key_value.aio.stores.redis import RedisStore
         client_storage = RedisStore(url=redis_url, default_collection="mcp-oauth")
 
-    auth = AzureProvider(
+    # Tolerate one retry with a just-rotated refresh token (see oauth_grace.py):
+    # prevents "connector linked but unauthorized" when the rotated token never
+    # reaches the client. 0 disables the grace window (strict one-time use).
+    rotation_grace = int(
+        os.getenv("OAUTH_ROTATION_GRACE_SECONDS", str(DEFAULT_ROTATION_GRACE_SECONDS))
+    )
+
+    auth = GraceAzureProvider(
+        rotation_grace_seconds=rotation_grace,
         client_id=entra_client_id,
         client_secret=entra_client_secret,
         tenant_id=entra_tenant_id,
