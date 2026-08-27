@@ -2027,3 +2027,256 @@ def unified_search(
             results.setdefault("other", []).append(item)
 
     return {k: v for k, v in results.items() if v}
+
+
+# --- SharePoint (read-only) -------------------------------------------------
+# Delegated auth: Graph enforces the user's own SharePoint permissions, so
+# these tools can never expose content the signed-in user cannot open in the
+# browser. Only drive-scoped endpoints are used, so the already-consented
+# delegated Files.ReadWrite suffices (no Sites.Read.All needed).
+
+
+def _sp_item_summary(item: dict[str, Any]) -> dict[str, Any]:
+    """Essential driveItem metadata only (token discipline: no content here)."""
+    return {
+        "name": item.get("name"),
+        "item_id": item.get("id"),
+        "drive_id": (item.get("parentReference") or {}).get("driveId"),
+        "type": "folder" if "folder" in item else "file",
+        "size": item.get("size", 0),
+        "modified": item.get("lastModifiedDateTime"),
+        "web_url": item.get("webUrl"),
+    }
+
+
+def _sp_get_item_meta(drive_id: str, item_id: str, account_id: str) -> dict[str, Any]:
+    meta = graph.request("GET", f"/drives/{drive_id}/items/{item_id}", account_id)
+    if not meta:
+        raise ValueError(f"Item {item_id} not found in drive {drive_id}")
+    return meta
+
+
+def _sp_download_bytes(
+    drive_id: str, item_id: str, account_id: str, max_bytes: int
+) -> tuple[str, str, bytes]:
+    """Download a SharePoint driveItem into memory. Returns (name, mime, raw)."""
+    import httpx
+
+    meta = _sp_get_item_meta(drive_id, item_id, account_id)
+    if "folder" in meta:
+        raise ValueError(f"'{meta.get('name')}' is a folder, not a file")
+    if meta.get("size", 0) > max_bytes:
+        _reject_oversized_attachment(meta.get("name", "unknown"), meta["size"], max_bytes)
+    download_url = meta.get("@microsoft.graph.downloadUrl")
+    if not download_url:
+        raise ValueError("No download URL available for this item")
+    resp = httpx.get(download_url, follow_redirects=True, timeout=120.0)
+    resp.raise_for_status()
+    name = meta.get("name", "unknown")
+    mime = (meta.get("file", {}) or {}).get("mimeType", "application/octet-stream")
+    return name, mime, resp.content
+
+
+@mcp.tool
+def sp_search(
+    query: str,
+    account_id: str,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    """Search files and folders across ALL SharePoint sites the user can access.
+
+    Use this to locate a document when you don't know which site/drive it lives
+    in (e.g. query "Data_Catalog" finds the catalogs on 100-SHARED). Returns
+    essential metadata per hit: name, item_id, drive_id, type, size, modified,
+    web_url. Feed drive_id + item_id to sp_list_folder / sp_get_file /
+    sp_get_excel. Searches OneDrive too (same driveItem index).
+    """
+    fields = [
+        "name",
+        "id",
+        "parentReference",
+        "webUrl",
+        "lastModifiedDateTime",
+        "size",
+        "file",
+        "folder",
+    ]
+    items = graph.search_query(query, ["driveItem"], account_id, limit, fields=fields)
+    return [_sp_item_summary(item) for item in items]
+
+
+@mcp.tool
+def sp_list_folder(
+    drive_id: str,
+    account_id: str,
+    item_id: str | None = None,
+    path: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """List the contents of a SharePoint folder (read-only, paginated).
+
+    Provide the folder as either:
+      - item_id: a folder id from sp_search / a previous sp_list_folder
+      - path:    a drive-relative path like "Documenti condivisi subfolder"
+                 (POWERBI/Integrazione Fabric/...) - no leading slash needed
+      - neither: lists the drive root
+
+    Returns essential metadata only (name, item_id, drive_id, type, size,
+    modified, web_url). Use sp_get_file / sp_get_excel to read contents.
+    """
+    if item_id and path:
+        raise ValueError("Provide item_id OR path, not both")
+    if item_id:
+        endpoint = f"/drives/{drive_id}/items/{item_id}/children"
+    elif path:
+        clean = path.strip("/")
+        endpoint = f"/drives/{drive_id}/root:/{clean}:/children"
+    else:
+        endpoint = f"/drives/{drive_id}/root/children"
+
+    params = {
+        "$top": min(limit, 200),
+        "$select": "id,name,size,lastModifiedDateTime,folder,file,webUrl,parentReference",
+    }
+    items = graph.request_paginated(endpoint, account_id, params=params, limit=limit)
+    return [_sp_item_summary(item) for item in items]
+
+
+@mcp.tool
+def sp_get_file(
+    drive_id: str,
+    item_id: str,
+    account_id: str,
+    save_path: str | None = None,
+    max_chars: int = ATTACHMENT_TEXT_MAX_CHARS,
+) -> dict[str, Any]:
+    """Read a SharePoint file's CONTENT (read-only).
+
+    Default: extracts text server-side (text/csv/xlsx/pdf/docx/pptx/html/...)
+    and returns it directly - same engine as read_attachment_text, capped at
+    max_chars. For xlsx catalogs prefer sp_get_excel (sheet/range selection).
+
+    save_path: download the raw file to a local path instead (stdio/local use
+    only - on the remote gateway the path is inside the container). Streams in
+    chunks, no size cap. Binary formats that can't be text-extracted
+    (images, legacy .doc/.xls, archives) return kind=unsupported: download
+    them via save_path or open web_url.
+    """
+    if save_path:
+        import httpx
+
+        meta = _sp_get_item_meta(drive_id, item_id, account_id)
+        download_url = meta.get("@microsoft.graph.downloadUrl")
+        if not download_url:
+            raise ValueError("No download URL available for this item")
+        target = pl.Path(save_path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with httpx.stream(
+                "GET", download_url, follow_redirects=True, timeout=120.0
+            ) as response:
+                response.raise_for_status()
+                with open(target, "wb") as fh:
+                    for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                        fh.write(chunk)
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(
+                f"Failed to download file: HTTP {e.response.status_code} from download URL"
+            ) from e
+        except (httpx.HTTPError, OSError) as e:
+            raise RuntimeError(f"Failed to download file: {e}") from e
+        return {
+            "path": str(target),
+            "name": meta.get("name", "unknown"),
+            "size": meta.get("size", 0),
+            "web_url": meta.get("webUrl"),
+        }
+
+    name, mime, raw = _sp_download_bytes(
+        drive_id, item_id, account_id, ATTACHMENT_PARSE_MAX_BYTES
+    )
+    hint = "Pass save_path to download it, or open its web_url."
+    return _build_text_response(name, mime, raw, max_chars, hint)
+
+
+@mcp.tool
+def sp_get_excel(
+    drive_id: str,
+    item_id: str,
+    account_id: str,
+    worksheet: str | None = None,
+    cell_range: str | None = None,
+    max_chars: int = ATTACHMENT_TEXT_MAX_CHARS,
+) -> dict[str, Any]:
+    """Read an xlsx on SharePoint via the Graph Excel API - no full download.
+
+    Without worksheet: returns the list of sheet names only (cheap - call this
+    first). With worksheet: returns that sheet's usedRange as TSV rows. With
+    worksheet + cell_range (e.g. "A1:F50"): returns just that range - prefer
+    this on big sheets to keep the payload small.
+
+    Falls back automatically to download + openpyxl parsing when the workbook
+    API is unavailable for the file (returns the same TSV shape with
+    source=download). Read-only: never modifies the workbook.
+    """
+    import httpx
+
+    base = f"/drives/{drive_id}/items/{item_id}/workbook"
+    try:
+        if worksheet is None:
+            result = graph.request(
+                "GET", f"{base}/worksheets", account_id, params={"$select": "name"}
+            )
+            sheets = [ws["name"] for ws in (result or {}).get("value", [])]
+            return {"source": "excel_api", "worksheets": sheets}
+
+        if cell_range:
+            endpoint = f"{base}/worksheets('{worksheet}')/range(address='{cell_range}')"
+        else:
+            endpoint = f"{base}/worksheets('{worksheet}')/usedRange(valuesOnly=true)"
+        result = graph.request(
+            "GET",
+            endpoint,
+            account_id,
+            params={"$select": "address,rowCount,columnCount,values"},
+        )
+        if not result:
+            raise ValueError(f"Empty response reading worksheet '{worksheet}'")
+        rows = result.get("values") or []
+        text = "\n".join(
+            "\t".join("" if c is None else str(c) for c in row) for row in rows
+        )
+        truncated = len(text) > max_chars
+        response: dict[str, Any] = {
+            "source": "excel_api",
+            "worksheet": worksheet,
+            "address": result.get("address"),
+            "row_count": result.get("rowCount"),
+            "column_count": result.get("columnCount"),
+            "values_tsv": text[:max_chars],
+            "truncated": truncated,
+        }
+        if truncated:
+            response["note"] = (
+                f"TSV truncated to {max_chars} of {len(text)} chars. "
+                "Use cell_range to read a smaller window, or raise max_chars."
+            )
+        return response
+
+    except httpx.HTTPStatusError as e:
+        # Workbook API can 4xx on some site drives (file locked, unsupported
+        # storage, >100MB): fall back to download + openpyxl.
+        if e.response.status_code >= 500:
+            raise
+        name, mime, raw = _sp_download_bytes(
+            drive_id, item_id, account_id, ATTACHMENT_PARSE_MAX_BYTES
+        )
+        result = _build_text_response(
+            name, mime, raw, max_chars, "Open its web_url instead."
+        )
+        result["source"] = "download"
+        result["note_fallback"] = (
+            f"Excel API returned HTTP {e.response.status_code}; parsed via "
+            "download + openpyxl instead (all sheets, TSV)."
+        )
+        return result

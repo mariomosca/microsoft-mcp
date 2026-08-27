@@ -62,6 +62,12 @@ def _configure_auth() -> None:
             "https://graph.microsoft.com/Mail.Send",
             "https://graph.microsoft.com/Calendars.ReadWrite",
             "https://graph.microsoft.com/Files.ReadWrite",
+            # NOTE: the sp_* SharePoint tools deliberately need no Sites.Read.All:
+            # they only use drive-scoped endpoints (/drives/{id}, /search/query
+            # driveItem), covered by the already-consented Files.ReadWrite.
+            # Requesting Sites.Read.All here would force a new admin consent and
+            # break connector logins until granted. Add it only if site-metadata
+            # endpoints (/sites) become necessary.
             "https://graph.microsoft.com/Contacts.Read",
             "https://graph.microsoft.com/People.Read",
         ],
